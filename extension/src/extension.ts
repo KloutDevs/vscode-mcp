@@ -186,7 +186,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.1.1",
+      version: "1.1.2",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -348,6 +348,9 @@ async function handleRequest(
       process.env.USERPROFILE ?? "", ".cursor", "projects"
     );
 
+    // Returns the response ONLY when the last assistant message is a final
+    // pure-text reply (no tool_use blocks). Messages with tool_use are
+    // intermediate steps — Cursor is still working.
     const parseLastAssistant = (): { text: string; composerId: string } | null => {
       if (!transcriptsDir || !fs.existsSync(transcriptsDir)) return null;
       const entries = fs.readdirSync(transcriptsDir, { withFileTypes: true })
@@ -362,7 +365,11 @@ async function handleRequest(
       if (assistants.length <= assistantCountBefore) return null;
       const last = assistants[assistants.length - 1] as Record<string,unknown>;
       const msg = last.message as { content?: Array<{ type: string; text?: string }> };
-      const text = (msg?.content ?? []).filter(c => c.type === "text")
+      const content = msg?.content ?? [];
+      // Only resolve when message has NO tool_use — that signals completion
+      const hasToolUse = content.some(c => c.type === "tool_use");
+      if (hasToolUse) return null;
+      const text = content.filter(c => c.type === "text")
         .map(c => c.text ?? "").join("")
         .replace(/<timestamp>[^<]*<\/timestamp>\s*/g, "")
         .replace(/<\/?user_query>\s*/g, "").trim();
@@ -398,6 +405,9 @@ async function handleRequest(
         if (fs.existsSync(watchDir)) {
           watcher = fs.watch(watchDir, { recursive: true }, (_event, filename) => {
             if (!filename?.endsWith(".jsonl")) return;
+            // Fire on every JSONL write. parseLastAssistant returns non-null
+            // ONLY when the last assistant message has no tool_use blocks,
+            // meaning Cursor has finished — no timeouts needed.
             const result = parseLastAssistant();
             if (result) settle({ ok: true, confirmed: true, attempt, ...result, waited_ms: Date.now() - startedAt }, 200);
           });

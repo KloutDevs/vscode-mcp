@@ -2,7 +2,7 @@
   "name": "cursor-mcp-bridge",
   "displayName": "Cursor MCP Bridge",
   "description": "Exposes Cursor/VS Code commands over a local HTTP server for the vscode-mcp MCP server",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "publisher": "kloutdevs",
   "engines": { "vscode": "^1.80.0" },
   "categories": ["Other"],
