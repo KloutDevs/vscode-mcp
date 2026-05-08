@@ -123,7 +123,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.0.3",
+      version: "1.0.4",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -168,27 +168,22 @@ async function handleRequest(
     const message = body.message as string | undefined;
     if (!message) return json(res, 400, { error: "message is required" });
 
-    // Step 1: open chat with message pre-filled in input
-    await vscode.commands.executeCommand("workbench.action.chat.open", {
-      query: message,
-      isPartialQuery: false,
-    });
+    // Write message to clipboard so glass.osEditPaste can use it
+    await vscode.env.clipboard.writeText(message);
 
-    // Step 2: wait for UI to render, then submit with Enter
-    await new Promise((r) => setTimeout(r, 400));
-    try {
-      // type \n into the focused input (submits the chat)
-      await vscode.commands.executeCommand("type", { text: "\n" });
-      return json(res, 200, { ok: true, message, method: "open+enter" });
-    } catch {
-      // fallback: try composer.sendToAgent
-      try {
-        await vscode.commands.executeCommand("composer.sendToAgent", message);
-        return json(res, 200, { ok: true, message, method: "sendToAgent" });
-      } catch (err) {
-        return json(res, 500, { ok: false, message, error: String(err) });
-      }
-    }
+    // Focus the existing chat input (does NOT open a new chat)
+    await vscode.commands.executeCommand("glass.focusInput");
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Clear any existing content and paste the message
+    await vscode.commands.executeCommand("glass.osEditSelectAll");
+    await vscode.commands.executeCommand("glass.osEditPaste");
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Submit
+    await vscode.commands.executeCommand("glass.queueRowSend");
+
+    return json(res, 200, { ok: true, message, method: "focus+paste+send" });
   }
 
   // ── GET /model/current ───────────────────────────────────────────────────────
