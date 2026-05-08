@@ -24,7 +24,7 @@
       "properties": {
         "cursorMcpBridge.port": {
           "type": "number",
-          "default": 8765,
+          "default": 9421,
           "description": "Port for the local HTTP bridge server"
         }
       }

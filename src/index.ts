@@ -19,7 +19,7 @@ const execAsync = promisify(exec);
 
 // ─── bridge helper ───────────────────────────────────────────────────────────
 
-const BRIDGE_PORT = parseInt(process.env.MCP_BRIDGE_PORT ?? "8765", 10);
+const BRIDGE_PORT = parseInt(process.env.MCP_BRIDGE_PORT ?? "9421", 10);
 
 function bridgeCall(method: string, path: string, body?: unknown): Promise<unknown> {
   return new Promise((resolve, reject) => {

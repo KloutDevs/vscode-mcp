@@ -52,7 +52,7 @@ export function deactivate() {
 // ─── HTTP server ──────────────────────────────────────────────────────────────
 
 function startServer(context: vscode.ExtensionContext) {
-  const port = vscode.workspace.getConfiguration("cursorMcpBridge").get<number>("port", 8765);
+  const port = vscode.workspace.getConfiguration("cursorMcpBridge").get<number>("port", 9421);
 
   server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -324,7 +324,7 @@ function log(msg: string) {
 }
 
 function showStatus() {
-  const port = vscode.workspace.getConfiguration("cursorMcpBridge").get<number>("port", 8765);
+  const port = vscode.workspace.getConfiguration("cursorMcpBridge").get<number>("port", 9421);
   outputChannel.show();
   outputChannel.appendLine(`\nStatus: server running on http://127.0.0.1:${port}`);
   outputChannel.appendLine(`Available endpoints:`);
