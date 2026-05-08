@@ -13,8 +13,41 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import { createReadStream } from "fs";
 import { createInterface } from "readline";
+import { request as httpRequest } from "http";
 
 const execAsync = promisify(exec);
+
+// ─── bridge helper ───────────────────────────────────────────────────────────
+
+const BRIDGE_PORT = parseInt(process.env.MCP_BRIDGE_PORT ?? "8765", 10);
+
+function bridgeCall(method: string, path: string, body?: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const payload = body !== undefined ? JSON.stringify(body) : undefined;
+    const req = httpRequest(
+      {
+        hostname: "127.0.0.1",
+        port: BRIDGE_PORT,
+        path,
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (c) => (data += c));
+        res.on("end", () => {
+          try { resolve(JSON.parse(data)); } catch { resolve(data); }
+        });
+      }
+    );
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
 
 const server = new Server(
   { name: "vscode-mcp", version: "1.0.0" },
@@ -288,6 +321,99 @@ const TOOLS: Tool[] = [
       required: ["path"],
     },
   },
+
+  // ── Cursor bridge tools (require the cursor-mcp-bridge extension running) ──
+  {
+    name: "cursor_status",
+    description: "Check if the Cursor MCP Bridge extension is running and get workspace info.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "cursor_list_commands",
+    description: "List Cursor/VS Code commands available in the IDE. Use filter to narrow results.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filter: { type: "string", description: "Optional keyword filter (e.g. 'chat', 'model', 'cursor')" },
+      },
+    },
+  },
+  {
+    name: "cursor_open_chat",
+    description: "Open a new chat, composer, or agent panel in Cursor.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["chat", "composer", "agent"],
+          description: "Which panel to open (default: chat)",
+        },
+        message: { type: "string", description: "Optional initial message to send" },
+      },
+    },
+  },
+  {
+    name: "cursor_send_message",
+    description: "Open the Cursor chat and send a message (starts a new conversation).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "Message to send in the chat" },
+      },
+      required: ["message"],
+    },
+  },
+  {
+    name: "cursor_get_model",
+    description: "Get the currently configured AI model in Cursor.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "cursor_set_model",
+    description: "Change the active AI model in Cursor (e.g. claude-sonnet-4-5, gpt-4o, gemini-pro).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        model: { type: "string", description: "Model identifier to set" },
+      },
+      required: ["model"],
+    },
+  },
+  {
+    name: "cursor_open_file",
+    description: "Open a file in the Cursor editor, optionally jumping to a specific line.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Absolute file path to open" },
+        line: { type: "number", description: "Line number to jump to (1-indexed)" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "cursor_editor_state",
+    description: "Get the current editor state: active file, cursor position, selected text, open editors.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "cursor_diagnostics",
+    description: "Get all errors and warnings (diagnostics) from the IDE's language servers.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "cursor_run_command",
+    description: "Execute any VS Code / Cursor command by its ID. Use cursor_list_commands to discover IDs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Command ID (e.g. 'workbench.action.reloadWindow')" },
+        args: { type: "array", description: "Optional arguments to pass to the command" },
+      },
+      required: ["command"],
+    },
+  },
 ];
 
 // ─── tool handlers ───────────────────────────────────────────────────────────
@@ -452,6 +578,76 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           extension: s.isFile() ? extname(basename(filePath)) : null,
         };
         return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
+      }
+
+      // ── Cursor bridge tools ───────────────────────────────────────────────
+
+      case "cursor_status": {
+        try {
+          const result = await bridgeCall("GET", "/status");
+          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        } catch {
+          return {
+            content: [{ type: "text", text: "Bridge not reachable. Make sure cursor-mcp-bridge extension is installed and Cursor is running." }],
+            isError: true,
+          };
+        }
+      }
+
+      case "cursor_list_commands": {
+        const filter = (a.filter as string | undefined) ?? "";
+        const qs = filter ? `?filter=${encodeURIComponent(filter)}` : "";
+        const result = await bridgeCall("GET", `/commands${qs}`);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_open_chat": {
+        const result = await bridgeCall("POST", "/chat/open", {
+          mode: (a.mode as string | undefined) ?? "chat",
+          message: a.message as string | undefined,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_send_message": {
+        const result = await bridgeCall("POST", "/chat/send", { message: a.message as string });
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_get_model": {
+        const result = await bridgeCall("GET", "/model/current");
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_set_model": {
+        const result = await bridgeCall("POST", "/model/set", { model: a.model as string });
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_open_file": {
+        const result = await bridgeCall("POST", "/editor/open", {
+          path: a.path as string,
+          line: a.line as number | undefined,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_editor_state": {
+        const result = await bridgeCall("GET", "/editor/state");
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_diagnostics": {
+        const result = await bridgeCall("GET", "/diagnostics");
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_run_command": {
+        const result = await bridgeCall("POST", "/command", {
+          command: a.command as string,
+          args: a.args as unknown[] | undefined,
+        });
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 
       default:

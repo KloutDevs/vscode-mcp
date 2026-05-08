@@ -1,0 +1,341 @@
+import * as vscode from "vscode";
+import * as http from "http";
+
+// Known Cursor / VS Code command IDs to try, ordered by likelihood
+const CHAT_OPEN_COMMANDS = [
+  "aichat.newchataction",
+  "cursor.chat.openChat",
+  "workbench.panel.chat.view.copilot.focus",
+  "workbench.action.chat.open",
+  "cursor.openChat",
+];
+
+const COMPOSER_OPEN_COMMANDS = [
+  "composer.startComposerPrompt",
+  "cursor.composer.open",
+  "workbench.action.chat.openEditSession",
+];
+
+const AGENT_OPEN_COMMANDS = [
+  "cursor.chat.openAgentPanel",
+  "cursor.startAgent",
+];
+
+let server: http.Server | null = null;
+let statusBarItem: vscode.StatusBarItem;
+let outputChannel: vscode.OutputChannel;
+
+// ─── activation ──────────────────────────────────────────────────────────────
+
+export function activate(context: vscode.ExtensionContext) {
+  outputChannel = vscode.window.createOutputChannel("Cursor MCP Bridge");
+  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBarItem.command = "cursorMcpBridge.showStatus";
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("cursorMcpBridge.showStatus", showStatus),
+    vscode.commands.registerCommand("cursorMcpBridge.restart", () => {
+      stopServer();
+      startServer(context);
+    }),
+    statusBarItem,
+    outputChannel
+  );
+
+  startServer(context);
+}
+
+export function deactivate() {
+  stopServer();
+}
+
+// ─── HTTP server ──────────────────────────────────────────────────────────────
+
+function startServer(context: vscode.ExtensionContext) {
+  const port = vscode.workspace.getConfiguration("cursorMcpBridge").get<number>("port", 8765);
+
+  server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      handleRequest(req, res, body).catch((err) => {
+        log(`Unhandled error: ${err}`);
+        if (!res.headersSent) {
+          res.writeHead(500);
+          res.end(JSON.stringify({ error: String(err) }));
+        }
+      });
+    });
+  });
+
+  server.listen(port, "127.0.0.1", () => {
+    log(`Bridge listening on http://127.0.0.1:${port}`);
+    statusBarItem.text = `$(radio-tower) MCP :${port}`;
+    statusBarItem.tooltip = `Cursor MCP Bridge active on port ${port}`;
+    statusBarItem.show();
+  });
+
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    const msg = err.code === "EADDRINUSE"
+      ? `Port ${port} already in use. Change cursorMcpBridge.port in settings.`
+      : `Server error: ${err.message}`;
+    log(msg);
+    vscode.window.showErrorMessage(`MCP Bridge: ${msg}`);
+    statusBarItem.text = `$(error) MCP Bridge error`;
+    statusBarItem.show();
+  });
+}
+
+function stopServer() {
+  server?.close();
+  server = null;
+}
+
+// ─── request router ───────────────────────────────────────────────────────────
+
+async function handleRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  rawBody: string
+) {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const method = req.method?.toUpperCase() ?? "GET";
+  const path = url.pathname;
+
+  log(`${method} ${path}`);
+
+  let parsed: unknown = {};
+  if (rawBody) {
+    try { parsed = JSON.parse(rawBody); } catch { /* ignore */ }
+  }
+  const body = parsed as Record<string, unknown>;
+
+  const route = `${method} ${path}`;
+
+  // ── GET /status ─────────────────────────────────────────────────────────────
+  if (route === "GET /status") {
+    return json(res, 200, {
+      active: true,
+      version: "1.0.0",
+      port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
+      workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
+    });
+  }
+
+  // ── GET /commands ────────────────────────────────────────────────────────────
+  if (route === "GET /commands") {
+    const filter = url.searchParams.get("filter") ?? "";
+    const all = await vscode.commands.getCommands(true);
+    const filtered = filter
+      ? all.filter((c) => c.toLowerCase().includes(filter.toLowerCase()))
+      : all.filter((c) =>
+          c.startsWith("cursor") ||
+          c.startsWith("composer") ||
+          c.startsWith("aichat") ||
+          c.includes("chat") ||
+          c.includes("agent") ||
+          c.includes("model")
+        );
+    filtered.sort();
+    return json(res, 200, { count: filtered.length, commands: filtered });
+  }
+
+  // ── POST /chat/open ──────────────────────────────────────────────────────────
+  if (route === "POST /chat/open") {
+    const mode = (body.mode as string | undefined) ?? "chat";
+    const message = body.message as string | undefined;
+
+    const commandLists: Record<string, string[]> = {
+      chat: CHAT_OPEN_COMMANDS,
+      composer: COMPOSER_OPEN_COMMANDS,
+      agent: AGENT_OPEN_COMMANDS,
+    };
+
+    const commands = commandLists[mode] ?? CHAT_OPEN_COMMANDS;
+    const result = await tryCommands(commands, message ? { query: message } : undefined);
+    return json(res, result.ok ? 200 : 500, result);
+  }
+
+  // ── POST /chat/send ──────────────────────────────────────────────────────────
+  if (route === "POST /chat/send") {
+    const message = body.message as string | undefined;
+    if (!message) return json(res, 400, { error: "message is required" });
+
+    // Try to open chat with the message as initial query
+    const result = await tryCommands(CHAT_OPEN_COMMANDS, { query: message });
+    return json(res, result.ok ? 200 : 500, result);
+  }
+
+  // ── GET /model/current ───────────────────────────────────────────────────────
+  if (route === "GET /model/current") {
+    const config = vscode.workspace.getConfiguration();
+    const candidates = [
+      "cursor.chat.defaultModel",
+      "cursor.chat.model",
+      "cursor.defaultModel",
+      "github.copilot.chat.defaultModel",
+    ];
+    const found: Record<string, unknown> = {};
+    for (const key of candidates) {
+      const val = config.get(key);
+      if (val !== undefined) found[key] = val;
+    }
+    return json(res, 200, { settings: found });
+  }
+
+  // ── POST /model/set ──────────────────────────────────────────────────────────
+  if (route === "POST /model/set") {
+    const model = body.model as string | undefined;
+    if (!model) return json(res, 400, { error: "model is required" });
+
+    const target = vscode.ConfigurationTarget.Global;
+    const config = vscode.workspace.getConfiguration();
+    const keys = ["cursor.chat.defaultModel", "cursor.chat.model", "cursor.defaultModel"];
+
+    const updated: string[] = [];
+    const errors: string[] = [];
+
+    for (const key of keys) {
+      try {
+        await config.update(key, model, target);
+        updated.push(key);
+      } catch {
+        errors.push(key);
+      }
+    }
+
+    return json(res, 200, { model, updated, errors });
+  }
+
+  // ── POST /command ─────────────────────────────────────────────────────────────
+  if (route === "POST /command") {
+    const command = body.command as string | undefined;
+    if (!command) return json(res, 400, { error: "command is required" });
+    const args = body.args as unknown[] | undefined;
+
+    try {
+      const result = await vscode.commands.executeCommand(command, ...(args ?? []));
+      return json(res, 200, { ok: true, command, result: result ?? null });
+    } catch (err) {
+      return json(res, 500, { ok: false, command, error: String(err) });
+    }
+  }
+
+  // ── POST /editor/open ─────────────────────────────────────────────────────────
+  if (route === "POST /editor/open") {
+    const filePath = body.path as string | undefined;
+    const line = body.line as number | undefined;
+    if (!filePath) return json(res, 400, { error: "path is required" });
+
+    const uri = vscode.Uri.file(filePath);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(doc);
+
+    if (line !== undefined) {
+      const pos = new vscode.Position(Math.max(0, line - 1), 0);
+      editor.selection = new vscode.Selection(pos, pos);
+      editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+    }
+
+    return json(res, 200, { ok: true, path: filePath, line });
+  }
+
+  // ── GET /editor/state ─────────────────────────────────────────────────────────
+  if (route === "GET /editor/state") {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) return json(res, 200, { activeEditor: null });
+
+    const sel = editor.selection;
+    const selectedText = editor.document.getText(sel);
+
+    return json(res, 200, {
+      activeEditor: {
+        path: editor.document.uri.fsPath,
+        language: editor.document.languageId,
+        line: sel.active.line + 1,
+        column: sel.active.character + 1,
+        selectedText: selectedText || null,
+        isDirty: editor.document.isDirty,
+      },
+      openEditors: vscode.window.visibleTextEditors.map((e) => ({
+        path: e.document.uri.fsPath,
+        language: e.document.languageId,
+      })),
+    });
+  }
+
+  // ── GET /diagnostics ──────────────────────────────────────────────────────────
+  if (route === "GET /diagnostics") {
+    const all = vscode.languages.getDiagnostics();
+    const result = all
+      .filter(([, diags]) => diags.length > 0)
+      .map(([uri, diags]) => ({
+        file: uri.fsPath,
+        diagnostics: diags.map((d) => ({
+          severity: ["Error", "Warning", "Information", "Hint"][d.severity],
+          line: d.range.start.line + 1,
+          column: d.range.start.character + 1,
+          message: d.message,
+          source: d.source,
+          code: d.code,
+        })),
+      }));
+    return json(res, 200, { count: result.reduce((n, r) => n + r.diagnostics.length, 0), files: result });
+  }
+
+  return json(res, 404, { error: `Unknown route: ${method} ${path}` });
+}
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+
+async function tryCommands(
+  commands: string[],
+  args?: unknown
+): Promise<{ ok: boolean; command?: string; tried: string[]; error?: string }> {
+  const tried: string[] = [];
+  for (const cmd of commands) {
+    tried.push(cmd);
+    try {
+      await vscode.commands.executeCommand(cmd, ...(args ? [args] : []));
+      return { ok: true, command: cmd, tried };
+    } catch {
+      // try next
+    }
+  }
+  return { ok: false, tried, error: `None of the tried commands succeeded: ${commands.join(", ")}` };
+}
+
+function json(res: http.ServerResponse, status: number, data: unknown) {
+  res.writeHead(status);
+  res.end(JSON.stringify(data, null, 2));
+}
+
+function log(msg: string) {
+  outputChannel.appendLine(`[${new Date().toISOString()}] ${msg}`);
+}
+
+function showStatus() {
+  const port = vscode.workspace.getConfiguration("cursorMcpBridge").get<number>("port", 8765);
+  outputChannel.show();
+  outputChannel.appendLine(`\nStatus: server running on http://127.0.0.1:${port}`);
+  outputChannel.appendLine(`Available endpoints:`);
+  outputChannel.appendLine(`  GET  /status`);
+  outputChannel.appendLine(`  GET  /commands?filter=<text>`);
+  outputChannel.appendLine(`  GET  /editor/state`);
+  outputChannel.appendLine(`  GET  /diagnostics`);
+  outputChannel.appendLine(`  GET  /model/current`);
+  outputChannel.appendLine(`  POST /chat/open   { mode?: "chat"|"composer"|"agent", message? }`);
+  outputChannel.appendLine(`  POST /chat/send   { message }`);
+  outputChannel.appendLine(`  POST /model/set   { model }`);
+  outputChannel.appendLine(`  POST /editor/open { path, line? }`);
+  outputChannel.appendLine(`  POST /command     { command, args? }`);
+}
