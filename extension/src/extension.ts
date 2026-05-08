@@ -500,21 +500,22 @@ async function handleRequest(
     await vscode.commands.executeCommand("glass.osEditPaste");
     await new Promise((r) => setTimeout(r, 250));
 
-    // Try Enter up to 3 times, confirming via transcript
+    // Press Enter ONCE and wait for real transcript confirmation.
+    // Only retry if after a long wait there is still no new user message
+    // (meaning the Enter genuinely failed, not just was slow).
+    // This prevents double-sends caused by premature retries.
     const MAX_ATTEMPTS = 3;
-    const CONFIRM_TIMEOUT_MS = 15000;
+    const CONFIRM_TIMEOUT_MS = 60_000; // 60s — generous enough for slow transcript writes
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       await sendEnterKey();
-      log(`Send attempt ${attempt}: waiting for transcript confirmation...`);
+      log(`Send attempt ${attempt}: waiting for transcript confirmation (up to ${CONFIRM_TIMEOUT_MS / 1000}s)...`);
 
       const deadline = Date.now() + CONFIRM_TIMEOUT_MS;
-      let confirmed = false;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1500));
         const after = countUserMessages(sinceMs, composerId ?? undefined);
         if (after.count > userCountBefore) {
-          confirmed = true;
           lastSendTime = Date.now();
           lastActivityTime = Date.now();
           log(`Send confirmed on attempt ${attempt} (user msgs: ${userCountBefore} → ${after.count})`);
@@ -526,7 +527,8 @@ async function handleRequest(
           });
         }
       }
-      if (!confirmed && attempt < MAX_ATTEMPTS) {
+      // Only reach here if Enter truly had no effect after 60s
+      if (attempt < MAX_ATTEMPTS) {
         log(`Attempt ${attempt} unconfirmed, retrying...`);
         // Re-paste before retrying Enter (input might have been cleared)
         await vscode.env.clipboard.writeText(message);
