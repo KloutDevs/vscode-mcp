@@ -67,6 +67,11 @@ export function deactivate() {
 
 // ─── transcript helpers ───────────────────────────────────────────────────────
 
+function getWorkspaceName(): string {
+  const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+  return wsPath ? nodePath.basename(wsPath) : "";
+}
+
 function getTranscriptsDir(): string | null {
   const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!wsPath) return null;
@@ -75,11 +80,28 @@ function getTranscriptsDir(): string | null {
   return nodePath.join(userHome, ".cursor", "projects", slug, "agent-transcripts");
 }
 
-/** Count user messages in all transcripts created after sinceMs. Returns -1 if no file. */
-function countUserMessages(sinceMs = 0): { count: number; composerId: string | null } {
+/** Direct path to a specific composer's JSONL — bypasses time-based scanning entirely. */
+function composerJsonlPath(composerId: string): string | null {
+  const dir = getTranscriptsDir();
+  if (!dir) return null;
+  const p = nodePath.join(dir, composerId, `${composerId}.jsonl`);
+  return fs.existsSync(p) ? p : null;
+}
+
+/** Count user messages. If composerId given, reads that file directly (no scanning). */
+function countUserMessages(sinceMs = 0, composerId?: string): { count: number; composerId: string | null } {
+  // Fast path: known composerId
+  if (composerId) {
+    const jsonl = composerJsonlPath(composerId);
+    if (!jsonl) return { count: 0, composerId };
+    const lines = fs.readFileSync(jsonl, "utf-8").split("\n").filter((l) => l.trim());
+    const count = lines.reduce((n, l) => { try { return JSON.parse(l).role === "user" ? n + 1 : n; } catch { return n; } }, 0);
+    return { count, composerId };
+  }
+
+  // Slow path: scan by time (first send of a new session)
   const dir = getTranscriptsDir();
   if (!dir || !fs.existsSync(dir)) return { count: 0, composerId: null };
-
   const entries = fs.readdirSync(dir, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .map((d) => {
@@ -89,21 +111,20 @@ function countUserMessages(sinceMs = 0): { count: number; composerId: string | n
     })
     .filter((e) => e.mtime > sinceMs)
     .sort((a, b) => b.mtime - a.mtime);
-
   if (entries.length === 0) return { count: -1, composerId: null };
-
   const { id, jsonl } = entries[0];
   const lines = fs.readFileSync(jsonl, "utf-8").split("\n").filter((l) => l.trim());
-  const userCount = lines.reduce((n, l) => {
-    try { return JSON.parse(l).role === "user" ? n + 1 : n; } catch { return n; }
-  }, 0);
-  return { count: userCount, composerId: id };
+  const count = lines.reduce((n, l) => { try { return JSON.parse(l).role === "user" ? n + 1 : n; } catch { return n; } }, 0);
+  return { count, composerId: id };
 }
 
 function sendEnterKey(): Promise<void> {
   return new Promise((resolve) => {
+    // Use workspace-specific window title so we target the right Cursor instance
+    const wsName = getWorkspaceName();
+    const windowTitle = wsName ? `${wsName} - Cursor` : "Cursor";
     exec(
-      `powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "$wsh = New-Object -ComObject WScript.Shell; $wsh.AppActivate('Cursor'); Start-Sleep -Milliseconds 200; $wsh.SendKeys('{ENTER}')"`,
+      `powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "$wsh = New-Object -ComObject WScript.Shell; $wsh.AppActivate('${windowTitle}'); Start-Sleep -Milliseconds 200; $wsh.SendKeys('{ENTER}')"`,
       () => resolve()
     );
   });
@@ -186,8 +207,9 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.1.2",
-      port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
+      version: "1.1.3",
+      port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 9421),
+      workspace: getWorkspaceName(),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
   }
@@ -228,33 +250,45 @@ async function handleRequest(
 
   // ── GET /chat/read ───────────────────────────────────────────────────────────
   if (route === "GET /chat/read") {
-    const sinceMs = Number(url.searchParams.get("since") ?? "0");
+    const sinceMs       = Number(url.searchParams.get("since") ?? "0");
+    const composerParam = url.searchParams.get("composer_id") ?? undefined;
     const transcriptsDir = getTranscriptsDir();
 
     if (!transcriptsDir || !fs.existsSync(transcriptsDir)) {
       return json(res, 404, { error: `No transcripts dir found` });
     }
 
-    const entries = fs.readdirSync(transcriptsDir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => {
-        const jsonl = nodePath.join(transcriptsDir, d.name, `${d.name}.jsonl`);
-        const mtime = fs.existsSync(jsonl) ? fs.statSync(jsonl).mtimeMs : 0;
-        return { id: d.name, jsonl, mtime };
-      })
-      .filter((e) => e.mtime > sinceMs)
-      .sort((a, b) => b.mtime - a.mtime);
+    let composerId: string;
+    let jsonlPath: string;
 
-    if (entries.length === 0) {
-      return json(res, 404, {
-        error: sinceMs > 0
-          ? `No transcripts after ${new Date(sinceMs).toISOString()} yet`
-          : "No transcripts found",
-        responding: true,
-      });
+    if (composerParam) {
+      // Fast path: direct read by composerId — no scanning, no ambiguity
+      const direct = nodePath.join(transcriptsDir, composerParam, `${composerParam}.jsonl`);
+      if (!fs.existsSync(direct)) {
+        return json(res, 404, { error: `Transcript not found for composer ${composerParam}`, responding: true });
+      }
+      composerId = composerParam;
+      jsonlPath  = direct;
+    } else {
+      // Slow path: scan by mtime
+      const entries = fs.readdirSync(transcriptsDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => {
+          const jsonl = nodePath.join(transcriptsDir, d.name, `${d.name}.jsonl`);
+          const mtime = fs.existsSync(jsonl) ? fs.statSync(jsonl).mtimeMs : 0;
+          return { id: d.name, jsonl, mtime };
+        })
+        .filter((e) => e.mtime > sinceMs)
+        .sort((a, b) => b.mtime - a.mtime);
+      if (entries.length === 0) {
+        return json(res, 404, {
+          error: sinceMs > 0 ? `No transcripts after ${new Date(sinceMs).toISOString()} yet` : "No transcripts found",
+          responding: true,
+        });
+      }
+      composerId = entries[0].id;
+      jsonlPath  = entries[0].jsonl;
     }
-
-    const { id: composerId, jsonl: jsonlPath } = entries[0];
     const messages = fs.readFileSync(jsonlPath, "utf-8")
       .split("\n").filter((l) => l.trim())
       .map((l) => { try { return JSON.parse(l); } catch { return null; } })
@@ -450,9 +484,10 @@ async function handleRequest(
     const message = body.message as string | undefined;
     if (!message) return json(res, 400, { error: "message is required" });
 
-    // Snapshot current user-message count BEFORE sending
-    const sinceMs = (body.since_ms as number | undefined) ?? 0;
-    const before = countUserMessages(sinceMs);
+    // If caller already knows the composerId, use it directly (no scanning)
+    const sinceMs    = (body.since_ms    as number | undefined) ?? 0;
+    const composerId = body.composer_id  as string | undefined;
+    const before = countUserMessages(sinceMs, composerId);
     const userCountBefore = Math.max(0, before.count);
 
     // Write message to clipboard
@@ -477,7 +512,7 @@ async function handleRequest(
       let confirmed = false;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1500));
-        const after = countUserMessages(sinceMs);
+        const after = countUserMessages(sinceMs, composerId ?? undefined);
         if (after.count > userCountBefore) {
           confirmed = true;
           lastSendTime = Date.now();
@@ -487,6 +522,7 @@ async function handleRequest(
             ok: true, message, attempt,
             confirmed: true,
             composerId: after.composerId,
+            workspace: getWorkspaceName(),
           });
         }
       }
