@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as http from "http";
+import { exec } from "child_process";
 
 // Known Cursor / VS Code command IDs to try, ordered by likelihood
 const CHAT_OPEN_COMMANDS = [
@@ -123,7 +124,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.0.4",
+      version: "1.0.5",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -168,22 +169,28 @@ async function handleRequest(
     const message = body.message as string | undefined;
     if (!message) return json(res, 400, { error: "message is required" });
 
-    // Write message to clipboard so glass.osEditPaste can use it
+    // Write message to clipboard
     await vscode.env.clipboard.writeText(message);
 
     // Focus the existing chat input (does NOT open a new chat)
     await vscode.commands.executeCommand("glass.focusInput");
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 350));
 
-    // Clear any existing content and paste the message
+    // Paste message into input
     await vscode.commands.executeCommand("glass.osEditSelectAll");
     await vscode.commands.executeCommand("glass.osEditPaste");
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 250));
 
-    // Submit
-    await vscode.commands.executeCommand("glass.queueRowSend");
+    // Send Enter via WScript.Shell (faster than PowerShell full startup)
+    // The Cursor input is still focused at this point
+    await new Promise<void>((resolve) => {
+      exec(
+        `powershell -NonInteractive -WindowStyle Hidden -Command "$wsh = New-Object -ComObject WScript.Shell; $wsh.SendKeys('{ENTER}')"`,
+        () => resolve()
+      );
+    });
 
-    return json(res, 200, { ok: true, message, method: "focus+paste+send" });
+    return json(res, 200, { ok: true, message, method: "focus+paste+wscript-enter" });
   }
 
   // ── GET /model/current ───────────────────────────────────────────────────────
