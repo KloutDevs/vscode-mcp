@@ -62,6 +62,51 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
   stopServer();
+
+}
+
+// ─── transcript helpers ───────────────────────────────────────────────────────
+
+function getTranscriptsDir(): string | null {
+  const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!wsPath) return null;
+  const slug = wsPath.replace(/[:\\/]+/g, "-").replace(/^-/, "").replace(/-+/g, "-");
+  const userHome = process.env.USERPROFILE ?? process.env.HOME ?? "";
+  return nodePath.join(userHome, ".cursor", "projects", slug, "agent-transcripts");
+}
+
+/** Count user messages in all transcripts created after sinceMs. Returns -1 if no file. */
+function countUserMessages(sinceMs = 0): { count: number; composerId: string | null } {
+  const dir = getTranscriptsDir();
+  if (!dir || !fs.existsSync(dir)) return { count: 0, composerId: null };
+
+  const entries = fs.readdirSync(dir, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => {
+      const jsonl = nodePath.join(dir, d.name, `${d.name}.jsonl`);
+      const mtime = fs.existsSync(jsonl) ? fs.statSync(jsonl).mtimeMs : 0;
+      return { id: d.name, jsonl, mtime };
+    })
+    .filter((e) => e.mtime > sinceMs)
+    .sort((a, b) => b.mtime - a.mtime);
+
+  if (entries.length === 0) return { count: -1, composerId: null };
+
+  const { id, jsonl } = entries[0];
+  const lines = fs.readFileSync(jsonl, "utf-8").split("\n").filter((l) => l.trim());
+  const userCount = lines.reduce((n, l) => {
+    try { return JSON.parse(l).role === "user" ? n + 1 : n; } catch { return n; }
+  }, 0);
+  return { count: userCount, composerId: id };
+}
+
+function sendEnterKey(): Promise<void> {
+  return new Promise((resolve) => {
+    exec(
+      `powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "$wsh = New-Object -ComObject WScript.Shell; $wsh.AppActivate('Cursor'); Start-Sleep -Milliseconds 200; $wsh.SendKeys('{ENTER}')"`,
+      () => resolve()
+    );
+  });
 }
 
 // ─── HTTP server ──────────────────────────────────────────────────────────────
@@ -141,7 +186,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.0.9",
+      version: "1.1.0",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -183,22 +228,13 @@ async function handleRequest(
 
   // ── GET /chat/read ───────────────────────────────────────────────────────────
   if (route === "GET /chat/read") {
-    const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!wsPath) return json(res, 400, { error: "No workspace open" });
+    const sinceMs = Number(url.searchParams.get("since") ?? "0");
+    const transcriptsDir = getTranscriptsDir();
 
-    // Derive the .cursor/projects slug from the workspace path
-    const slug = wsPath.replace(/[:\\/]+/g, "-").replace(/^-/, "").replace(/-+/g, "-");
-    const userHome = process.env.USERPROFILE ?? process.env.HOME ?? "";
-    const transcriptsDir = nodePath.join(userHome, ".cursor", "projects", slug, "agent-transcripts");
-
-    if (!fs.existsSync(transcriptsDir)) {
-      return json(res, 404, { error: `No transcripts dir: ${transcriptsDir}` });
+    if (!transcriptsDir || !fs.existsSync(transcriptsDir)) {
+      return json(res, 404, { error: `No transcripts dir found` });
     }
 
-    // Optional ?since=<unixMs> filters to transcripts created after that time
-    const sinceMs = Number(url.searchParams.get("since") ?? "0");
-
-    // Find the most recently modified composer transcript (respecting since)
     const entries = fs.readdirSync(transcriptsDir, { withFileTypes: true })
       .filter((d) => d.isDirectory())
       .map((d) => {
@@ -206,39 +242,31 @@ async function handleRequest(
         const mtime = fs.existsSync(jsonl) ? fs.statSync(jsonl).mtimeMs : 0;
         return { id: d.name, jsonl, mtime };
       })
-      .filter((e) => e.mtime > 0 && e.mtime > sinceMs)
+      .filter((e) => e.mtime > sinceMs)
       .sort((a, b) => b.mtime - a.mtime);
 
     if (entries.length === 0) {
       return json(res, 404, {
         error: sinceMs > 0
-          ? `No transcripts modified after ${new Date(sinceMs).toISOString()} — Cursor may still be responding`
-          : "No transcript files found",
+          ? `No transcripts after ${new Date(sinceMs).toISOString()} yet`
+          : "No transcripts found",
         responding: true,
       });
     }
 
     const { id: composerId, jsonl: jsonlPath } = entries[0];
-    const raw = fs.readFileSync(jsonlPath, "utf-8");
-
-    const messages = raw
-      .split("\n")
-      .filter((l) => l.trim())
-      .map((l) => {
-        try { return JSON.parse(l); } catch { return null; }
-      })
+    const messages = fs.readFileSync(jsonlPath, "utf-8")
+      .split("\n").filter((l) => l.trim())
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
       .filter(Boolean)
       .filter((l: Record<string, unknown>) => l.role === "user" || l.role === "assistant")
       .map((l: Record<string, unknown>) => {
         const msg = l.message as { content?: Array<{ type: string; text?: string }> };
         const text = (msg?.content ?? [])
           .filter((c) => c.type === "text")
-          .map((c) => c.text ?? "")
-          .join("")
+          .map((c) => c.text ?? "").join("")
           .replace(/<timestamp>[^<]*<\/timestamp>\s*/g, "")
-          .replace(/<user_query>\s*/g, "")
-          .replace(/<\/user_query>\s*/g, "")
-          .trim();
+          .replace(/<\/?user_query>\s*/g, "").trim();
         return { role: l.role as string, text };
       })
       .filter((m) => m.text);
@@ -271,32 +299,59 @@ async function handleRequest(
     const message = body.message as string | undefined;
     if (!message) return json(res, 400, { error: "message is required" });
 
-    // Mark send time for /chat/status polling
-    lastSendTime = Date.now();
-    lastActivityTime = Date.now();
+    // Snapshot current user-message count BEFORE sending
+    const sinceMs = (body.since_ms as number | undefined) ?? 0;
+    const before = countUserMessages(sinceMs);
+    const userCountBefore = Math.max(0, before.count);
 
     // Write message to clipboard
     await vscode.env.clipboard.writeText(message);
 
-    // Focus the existing chat input (does NOT open a new chat)
+    // Paste into existing chat input (no new chat opened)
     await vscode.commands.executeCommand("glass.focusInput");
     await new Promise((r) => setTimeout(r, 350));
-
-    // Paste message into input
     await vscode.commands.executeCommand("glass.osEditSelectAll");
     await vscode.commands.executeCommand("glass.osEditPaste");
     await new Promise((r) => setTimeout(r, 250));
 
-    // Re-activate Cursor and send Enter via WScript.Shell
-    // -NoProfile speeds up startup; AppActivate ensures Cursor has focus
-    await new Promise<void>((resolve) => {
-      exec(
-        `powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "$wsh = New-Object -ComObject WScript.Shell; $wsh.AppActivate('Cursor'); Start-Sleep -Milliseconds 200; $wsh.SendKeys('{ENTER}')"`,
-        () => resolve()
-      );
-    });
+    // Try Enter up to 3 times, confirming via transcript
+    const MAX_ATTEMPTS = 3;
+    const CONFIRM_TIMEOUT_MS = 15000;
 
-    return json(res, 200, { ok: true, message, method: "focus+paste+wscript-enter" });
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      await sendEnterKey();
+      log(`Send attempt ${attempt}: waiting for transcript confirmation...`);
+
+      const deadline = Date.now() + CONFIRM_TIMEOUT_MS;
+      let confirmed = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const after = countUserMessages(sinceMs);
+        if (after.count > userCountBefore) {
+          confirmed = true;
+          lastSendTime = Date.now();
+          lastActivityTime = Date.now();
+          log(`Send confirmed on attempt ${attempt} (user msgs: ${userCountBefore} → ${after.count})`);
+          return json(res, 200, {
+            ok: true, message, attempt,
+            confirmed: true,
+            composerId: after.composerId,
+          });
+        }
+      }
+      if (!confirmed && attempt < MAX_ATTEMPTS) {
+        log(`Attempt ${attempt} unconfirmed, retrying...`);
+        // Re-paste before retrying Enter (input might have been cleared)
+        await vscode.env.clipboard.writeText(message);
+        await vscode.commands.executeCommand("glass.focusInput");
+        await new Promise((r) => setTimeout(r, 300));
+        await vscode.commands.executeCommand("glass.osEditSelectAll");
+        await vscode.commands.executeCommand("glass.osEditPaste");
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+
+    return json(res, 500, { ok: false, message, confirmed: false, error: "Send not confirmed after 3 attempts" });
   }
 
   // ── GET /model/current ───────────────────────────────────────────────────────
