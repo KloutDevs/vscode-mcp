@@ -1,0 +1,28 @@
+{
+  "name": "vscode-mcp",
+  "version": "1.0.0",
+  "description": "MCP server that gives Claude IDE capabilities for VS Code and Cursor",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "prepare": "npm run build"
+  },
+  "bin": {
+    "vscode-mcp": "./dist/index.js"
+  },
+  "keywords": ["mcp", "vscode", "cursor", "claude", "ide", "modelcontextprotocol"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
