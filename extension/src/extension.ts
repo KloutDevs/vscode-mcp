@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as http from "http";
 import { exec } from "child_process";
 import * as fs from "fs";
-import * as path from "path";
+import * as nodePath from "path";
 
 // ─── response state tracking ─────────────────────────────────────────────────
 // We have no direct API to know when Cursor finishes generating a response.
@@ -141,7 +141,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.0.8",
+      version: "1.0.9",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -189,24 +189,34 @@ async function handleRequest(
     // Derive the .cursor/projects slug from the workspace path
     const slug = wsPath.replace(/[:\\/]+/g, "-").replace(/^-/, "").replace(/-+/g, "-");
     const userHome = process.env.USERPROFILE ?? process.env.HOME ?? "";
-    const transcriptsDir = path.join(userHome, ".cursor", "projects", slug, "agent-transcripts");
+    const transcriptsDir = nodePath.join(userHome, ".cursor", "projects", slug, "agent-transcripts");
 
     if (!fs.existsSync(transcriptsDir)) {
       return json(res, 404, { error: `No transcripts dir: ${transcriptsDir}` });
     }
 
-    // Find the most recently modified composer transcript
+    // Optional ?since=<unixMs> filters to transcripts created after that time
+    const sinceMs = Number(url.searchParams.get("since") ?? "0");
+
+    // Find the most recently modified composer transcript (respecting since)
     const entries = fs.readdirSync(transcriptsDir, { withFileTypes: true })
       .filter((d) => d.isDirectory())
       .map((d) => {
-        const jsonl = path.join(transcriptsDir, d.name, `${d.name}.jsonl`);
+        const jsonl = nodePath.join(transcriptsDir, d.name, `${d.name}.jsonl`);
         const mtime = fs.existsSync(jsonl) ? fs.statSync(jsonl).mtimeMs : 0;
         return { id: d.name, jsonl, mtime };
       })
-      .filter((e) => e.mtime > 0)
+      .filter((e) => e.mtime > 0 && e.mtime > sinceMs)
       .sort((a, b) => b.mtime - a.mtime);
 
-    if (entries.length === 0) return json(res, 404, { error: "No transcript files found" });
+    if (entries.length === 0) {
+      return json(res, 404, {
+        error: sinceMs > 0
+          ? `No transcripts modified after ${new Date(sinceMs).toISOString()} — Cursor may still be responding`
+          : "No transcript files found",
+        responding: true,
+      });
+    }
 
     const { id: composerId, jsonl: jsonlPath } = entries[0];
     const raw = fs.readFileSync(jsonlPath, "utf-8");
