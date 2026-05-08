@@ -4,21 +4,19 @@ import * as http from "http";
 // Known Cursor / VS Code command IDs to try, ordered by likelihood
 const CHAT_OPEN_COMMANDS = [
   "aichat.newchataction",
-  "cursor.chat.openChat",
-  "workbench.panel.chat.view.copilot.focus",
   "workbench.action.chat.open",
-  "cursor.openChat",
+  "workbench.panel.chat.view.copilot.focus",
 ];
 
 const COMPOSER_OPEN_COMMANDS = [
-  "composer.startComposerPrompt",
-  "cursor.composer.open",
-  "workbench.action.chat.openEditSession",
+  "composer.newAgentChat",
+  "workbench.panel.chat.view.edits.focus",
+  "workbench.action.chat.open",
 ];
 
 const AGENT_OPEN_COMMANDS = [
-  "cursor.chat.openAgentPanel",
-  "cursor.startAgent",
+  "composer.newAgentChat",
+  "aichat.newchataction",
 ];
 
 let server: http.Server | null = null;
@@ -125,7 +123,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.0.0",
+      version: "1.0.1",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
