@@ -186,7 +186,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.1.0",
+      version: "1.1.1",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -272,6 +272,147 @@ async function handleRequest(
       .filter((m) => m.text);
 
     return json(res, 200, { composerId, count: messages.length, messages });
+  }
+
+  // ── POST /chat/send_and_wait ─────────────────────────────────────────────────
+  // Sends a message with confirmation, then holds the HTTP connection open via
+  // fs.watch until Cursor writes a new assistant entry to the JSONL transcript.
+  if (route === "POST /chat/send_and_wait") {
+    const message = body.message as string | undefined;
+    if (!message) return json(res, 400, { error: "message is required" });
+
+    const sinceMs  = (body.since_ms  as number | undefined) ?? 0;
+    const timeoutMs = (body.timeout_ms as number | undefined) ?? 300_000; // 5 min
+
+    // ── Step 1: confirmed send ────────────────────────────────────────────────
+    const before = countUserMessages(sinceMs);
+    const userCountBefore = Math.max(0, before.count);
+
+    // snapshot assistant count before sending
+    const transcriptsDir = getTranscriptsDir();
+    const assistantCountBefore = (() => {
+      if (!transcriptsDir || !fs.existsSync(transcriptsDir)) return 0;
+      const entries = fs.readdirSync(transcriptsDir, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => {
+          const jsonl = nodePath.join(transcriptsDir, d.name, `${d.name}.jsonl`);
+          return fs.existsSync(jsonl) ? fs.statSync(jsonl).mtimeMs : 0;
+        }).filter(m => m > sinceMs);
+      if (entries.length === 0) return 0;
+      // count assistant lines across all relevant transcripts
+      const entries2 = fs.readdirSync(transcriptsDir, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => { const j = nodePath.join(transcriptsDir, d.name, `${d.name}.jsonl`); return { id: d.name, jsonl: j, mtime: fs.existsSync(j) ? fs.statSync(j).mtimeMs : 0 }; })
+        .filter(e => e.mtime > sinceMs).sort((a,b) => b.mtime - a.mtime);
+      if (entries2.length === 0) return 0;
+      return fs.readFileSync(entries2[0].jsonl, "utf-8").split("\n").filter(l=>l.trim()).reduce((n,l) => { try { return JSON.parse(l).role==="assistant"?n+1:n; } catch { return n; } }, 0);
+    })();
+
+    await vscode.env.clipboard.writeText(message);
+    await vscode.commands.executeCommand("glass.focusInput");
+    await new Promise(r => setTimeout(r, 350));
+    await vscode.commands.executeCommand("glass.osEditSelectAll");
+    await vscode.commands.executeCommand("glass.osEditPaste");
+    await new Promise(r => setTimeout(r, 250));
+
+    let attempt = 0;
+    let sendConfirmed = false;
+    for (let a = 1; a <= 3 && !sendConfirmed; a++) {
+      attempt = a;
+      await sendEnterKey();
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline && !sendConfirmed) {
+        await new Promise(r => setTimeout(r, 1500));
+        if (countUserMessages(sinceMs).count > userCountBefore) sendConfirmed = true;
+      }
+      if (!sendConfirmed && a < 3) {
+        await vscode.env.clipboard.writeText(message);
+        await vscode.commands.executeCommand("glass.focusInput");
+        await new Promise(r => setTimeout(r, 300));
+        await vscode.commands.executeCommand("glass.osEditSelectAll");
+        await vscode.commands.executeCommand("glass.osEditPaste");
+        await new Promise(r => setTimeout(r, 250));
+      }
+    }
+
+    if (!sendConfirmed) {
+      return json(res, 500, { ok: false, error: "Send not confirmed after 3 attempts" });
+    }
+
+    lastSendTime = Date.now();
+    lastActivityTime = Date.now();
+    log(`Message sent (attempt ${attempt}), watching for Cursor response...`);
+
+    // ── Step 2: fs.watch for assistant reply ──────────────────────────────────
+    const watchDir = transcriptsDir ?? nodePath.join(
+      process.env.USERPROFILE ?? "", ".cursor", "projects"
+    );
+
+    const parseLastAssistant = (): { text: string; composerId: string } | null => {
+      if (!transcriptsDir || !fs.existsSync(transcriptsDir)) return null;
+      const entries = fs.readdirSync(transcriptsDir, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => { const j = nodePath.join(transcriptsDir, d.name, `${d.name}.jsonl`); return { id: d.name, jsonl: j, mtime: fs.existsSync(j) ? fs.statSync(j).mtimeMs : 0 }; })
+        .filter(e => e.mtime > sinceMs).sort((a,b) => b.mtime - a.mtime);
+      if (entries.length === 0) return null;
+      const { id, jsonl } = entries[0];
+      const lines = fs.readFileSync(jsonl, "utf-8").split("\n").filter(l=>l.trim());
+      const assistants = lines.map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(Boolean).filter((l: Record<string,unknown>) => l.role === "assistant");
+      if (assistants.length <= assistantCountBefore) return null;
+      const last = assistants[assistants.length - 1] as Record<string,unknown>;
+      const msg = last.message as { content?: Array<{ type: string; text?: string }> };
+      const text = (msg?.content ?? []).filter(c => c.type === "text")
+        .map(c => c.text ?? "").join("")
+        .replace(/<timestamp>[^<]*<\/timestamp>\s*/g, "")
+        .replace(/<\/?user_query>\s*/g, "").trim();
+      return text ? { text, composerId: id } : null;
+    };
+
+    // Check immediately (might already be written)
+    const immediate = parseLastAssistant();
+    if (immediate) {
+      return json(res, 200, { ok: true, confirmed: true, attempt, ...immediate, waited_ms: 0 });
+    }
+
+    // Hold the HTTP connection — resolve via watcher or timeout
+    return new Promise<void>(resolve => {
+      let settled = false;
+      const startedAt = Date.now();
+
+      const settle = (data: unknown, status: number) => {
+        if (settled) return;
+        settled = true;
+        watcher?.close();
+        clearTimeout(timer);
+        const payload = Buffer.from(JSON.stringify(data, null, 2), "utf8");
+        if (!res.headersSent) {
+          res.writeHead(status, { "Content-Length": payload.length });
+          res.end(payload);
+        }
+        resolve();
+      };
+
+      let watcher: ReturnType<typeof fs.watch> | null = null;
+      try {
+        if (fs.existsSync(watchDir)) {
+          watcher = fs.watch(watchDir, { recursive: true }, (_event, filename) => {
+            if (!filename?.endsWith(".jsonl")) return;
+            const result = parseLastAssistant();
+            if (result) settle({ ok: true, confirmed: true, attempt, ...result, waited_ms: Date.now() - startedAt }, 200);
+          });
+        }
+      } catch (err) {
+        log(`fs.watch failed: ${err} — falling back to timeout`);
+      }
+
+      const timer = setTimeout(() => {
+        // One last check before giving up
+        const last = parseLastAssistant();
+        if (last) settle({ ok: true, confirmed: true, attempt, ...last, waited_ms: Date.now() - startedAt }, 200);
+        else settle({ ok: false, error: "timeout", waited_ms: timeoutMs }, 408);
+      }, timeoutMs);
+    });
   }
 
   // ── GET /chat/status ─────────────────────────────────────────────────────────

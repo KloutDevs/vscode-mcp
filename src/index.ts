@@ -386,6 +386,19 @@ const TOOLS: Tool[] = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "cursor_send_and_wait",
+    description: "Send a message to the current Cursor agent chat and wait (blocking) until Cursor finishes responding. Returns the full response text. Use since_ms from cursor_open_chat to scope to the current session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message:    { type: "string", description: "Message to send" },
+        since_ms:   { type: "number", description: "Unix ms timestamp — only look at transcripts created after this (use the value returned by cursor_open_chat)" },
+        timeout_ms: { type: "number", description: "Max ms to wait for Cursor's response (default 300000 = 5 min)" },
+      },
+      required: ["message", "since_ms"],
+    },
+  },
+  {
     name: "cursor_open_file",
     description: "Open a file in the Cursor editor, optionally jumping to a specific line.",
     inputSchema: {
@@ -607,11 +620,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "cursor_open_chat": {
+        const openedAt = Date.now();
         const result = await bridgeCall("POST", "/chat/open", {
           mode: (a.mode as string | undefined) ?? "chat",
           message: a.message as string | undefined,
         });
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ ...(result as object), since_ms: openedAt }, null, 2),
+          }],
+        };
       }
 
       case "cursor_send_message": {
@@ -632,6 +651,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "cursor_open_model_picker": {
         const result = await bridgeCall("POST", "/model/picker");
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_send_and_wait": {
+        const result = await bridgeCall("POST", "/chat/send_and_wait", {
+          message:    a.message as string,
+          since_ms:   a.since_ms as number,
+          timeout_ms: (a.timeout_ms as number | undefined) ?? 300_000,
+        }) as { ok?: boolean; response?: string; text?: string; composerId?: string; error?: string; waited_ms?: number };
+
+        if (!result.ok) {
+          return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+        }
+
+        const response = result.text ?? result.response ?? "";
+        return {
+          content: [{
+            type: "text",
+            text: `**Cursor respondió** (waited ${result.waited_ms}ms):\n\n${response}`,
+          }],
+        };
       }
 
       case "cursor_open_file": {
