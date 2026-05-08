@@ -381,6 +381,11 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "cursor_open_model_picker",
+    description: "Open the model selector UI in Cursor so the user can pick a model visually.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "cursor_open_file",
     description: "Open a file in the Cursor editor, optionally jumping to a specific line.",
     inputSchema: {
@@ -621,6 +626,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "cursor_set_model": {
         const result = await bridgeCall("POST", "/model/set", { model: a.model as string });
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_open_model_picker": {
+        const result = await bridgeCall("POST", "/model/picker");
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 

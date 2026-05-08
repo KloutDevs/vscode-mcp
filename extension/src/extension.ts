@@ -123,7 +123,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.0.1",
+      version: "1.0.2",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -176,18 +176,18 @@ async function handleRequest(
   // ── GET /model/current ───────────────────────────────────────────────────────
   if (route === "GET /model/current") {
     const config = vscode.workspace.getConfiguration();
-    const candidates = [
-      "cursor.chat.defaultModel",
-      "cursor.chat.model",
-      "cursor.defaultModel",
-      "github.copilot.chat.defaultModel",
+    // Scan all settings for anything that looks like a model slug
+    const allKeys = [
+      "cursor.chat.defaultModel", "cursor.chat.model", "cursor.defaultModel",
+      "cursorai.defaultModel", "cursorai.chat.model", "cursorai.modelSlug",
+      "glass.modelSlug", "github.copilot.chat.defaultModel",
     ];
     const found: Record<string, unknown> = {};
-    for (const key of candidates) {
+    for (const key of allKeys) {
       const val = config.get(key);
-      if (val !== undefined) found[key] = val;
+      if (val !== undefined && val !== null && val !== "") found[key] = val;
     }
-    return json(res, 200, { settings: found });
+    return json(res, 200, { settings: found, hint: "Use POST /model/picker to open the model selector UI" });
   }
 
   // ── POST /model/set ──────────────────────────────────────────────────────────
@@ -195,23 +195,24 @@ async function handleRequest(
     const model = body.model as string | undefined;
     if (!model) return json(res, 400, { error: "model is required" });
 
-    const target = vscode.ConfigurationTarget.Global;
-    const config = vscode.workspace.getConfiguration();
-    const keys = ["cursor.chat.defaultModel", "cursor.chat.model", "cursor.defaultModel"];
+    // Try Cursor's native model switch commands
+    const switchCmds = [
+      "cursorai.action.switchToModelSlug",
+      "cursorai.action.switchToModel",
+      "glass.cursorai.action.switchToModelSlug",
+    ];
+    const result = await tryCommands(switchCmds, model);
+    return json(res, result.ok ? 200 : 500, { model, ...result });
+  }
 
-    const updated: string[] = [];
-    const errors: string[] = [];
-
-    for (const key of keys) {
-      try {
-        await config.update(key, model, target);
-        updated.push(key);
-      } catch {
-        errors.push(key);
-      }
-    }
-
-    return json(res, 200, { model, updated, errors });
+  // ── POST /model/picker ────────────────────────────────────────────────────────
+  if (route === "POST /model/picker") {
+    const result = await tryCommands([
+      "glass.openModelPicker",
+      "composer.openModelToggle",
+      "cmdk.togglePromptBarModel",
+    ]);
+    return json(res, result.ok ? 200 : 500, result);
   }
 
   // ── POST /command ─────────────────────────────────────────────────────────────
@@ -333,7 +334,8 @@ function showStatus() {
   outputChannel.appendLine(`  GET  /model/current`);
   outputChannel.appendLine(`  POST /chat/open   { mode?: "chat"|"composer"|"agent", message? }`);
   outputChannel.appendLine(`  POST /chat/send   { message }`);
-  outputChannel.appendLine(`  POST /model/set   { model }`);
-  outputChannel.appendLine(`  POST /editor/open { path, line? }`);
+  outputChannel.appendLine(`  POST /model/set    { model }`);
+  outputChannel.appendLine(`  POST /model/picker (opens the model selector UI)`);
+  outputChannel.appendLine(`  POST /editor/open  { path, line? }`);
   outputChannel.appendLine(`  POST /command     { command, args? }`);
 }
