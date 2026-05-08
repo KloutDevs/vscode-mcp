@@ -123,7 +123,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.0.2",
+      version: "1.0.3",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -168,9 +168,27 @@ async function handleRequest(
     const message = body.message as string | undefined;
     if (!message) return json(res, 400, { error: "message is required" });
 
-    // Try to open chat with the message as initial query
-    const result = await tryCommands(CHAT_OPEN_COMMANDS, { query: message });
-    return json(res, result.ok ? 200 : 500, result);
+    // Step 1: open chat with message pre-filled in input
+    await vscode.commands.executeCommand("workbench.action.chat.open", {
+      query: message,
+      isPartialQuery: false,
+    });
+
+    // Step 2: wait for UI to render, then submit with Enter
+    await new Promise((r) => setTimeout(r, 400));
+    try {
+      // type \n into the focused input (submits the chat)
+      await vscode.commands.executeCommand("type", { text: "\n" });
+      return json(res, 200, { ok: true, message, method: "open+enter" });
+    } catch {
+      // fallback: try composer.sendToAgent
+      try {
+        await vscode.commands.executeCommand("composer.sendToAgent", message);
+        return json(res, 200, { ok: true, message, method: "sendToAgent" });
+      } catch (err) {
+        return json(res, 500, { ok: false, message, error: String(err) });
+      }
+    }
   }
 
   // ── GET /model/current ───────────────────────────────────────────────────────
