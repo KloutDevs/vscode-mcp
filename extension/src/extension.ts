@@ -2,6 +2,16 @@ import * as vscode from "vscode";
 import * as http from "http";
 import { exec } from "child_process";
 
+// ─── response state tracking ─────────────────────────────────────────────────
+// We have no direct API to know when Cursor finishes generating a response.
+// Heuristic: "responding" = within MIN_WAIT_MS of sending OR file activity
+// within INACTIVITY_MS. After both windows close, we consider it done.
+const MIN_WAIT_MS = 12000;      // always wait at least 12s after send
+const INACTIVITY_MS = 6000;     // 6s of no file edits = probably done
+
+let lastSendTime = 0;
+let lastActivityTime = 0;
+
 // Known Cursor / VS Code command IDs to try, ordered by likelihood
 const CHAT_OPEN_COMMANDS = [
   "aichat.newchataction",
@@ -36,6 +46,10 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("cursorMcpBridge.restart", () => {
       stopServer();
       startServer(context);
+    }),
+    // Track file edits as a proxy for "Cursor is still working"
+    vscode.workspace.onDidChangeTextDocument(() => {
+      lastActivityTime = Date.now();
     }),
     statusBarItem,
     outputChannel
@@ -125,7 +139,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.0.6",
+      version: "1.0.7",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -165,10 +179,34 @@ async function handleRequest(
     return json(res, result.ok ? 200 : 500, result);
   }
 
+  // ── GET /chat/status ─────────────────────────────────────────────────────────
+  if (route === "GET /chat/status") {
+    const now = Date.now();
+    const sinceLastSend = now - lastSendTime;
+    const sinceActivity = lastActivityTime > lastSendTime
+      ? now - lastActivityTime   // file edits happened after send
+      : sinceLastSend;           // no file edits yet — use send time
+    const responding =
+      lastSendTime === 0
+        ? false
+        : sinceLastSend < MIN_WAIT_MS || sinceActivity < INACTIVITY_MS;
+    return json(res, 200, {
+      responding,
+      ms_since_send: sinceLastSend,
+      ms_since_activity: sinceActivity,
+      min_wait_ms: MIN_WAIT_MS,
+      inactivity_ms: INACTIVITY_MS,
+    });
+  }
+
   // ── POST /chat/send ──────────────────────────────────────────────────────────
   if (route === "POST /chat/send") {
     const message = body.message as string | undefined;
     if (!message) return json(res, 400, { error: "message is required" });
+
+    // Mark send time for /chat/status polling
+    lastSendTime = Date.now();
+    lastActivityTime = Date.now();
 
     // Write message to clipboard
     await vscode.env.clipboard.writeText(message);
