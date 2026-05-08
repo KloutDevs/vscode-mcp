@@ -18,8 +18,14 @@ npx @vscode/vsce package --no-dependencies --out "$VSIX" 2>/dev/null
 
 echo "      Packaged: cursor-mcp-bridge-$VERSION.vsix"
 
-# 3. install via cursor CLI
-echo "[3/4] Installing extension in Cursor..."
+# 3. remove old versions + install new one
+echo "[3/4] Cleaning old versions and installing $VERSION..."
+EXTENSIONS_DIR="$USERPROFILE/.cursor/extensions"
+if [ -d "$EXTENSIONS_DIR" ]; then
+  for old in "$EXTENSIONS_DIR"/kloutdevs.cursor-mcp-bridge-*; do
+    [ -d "$old" ] && [ "$(basename "$old")" != "kloutdevs.cursor-mcp-bridge-$VERSION" ] && rm -rf "$old" && echo "      Removed $(basename "$old")"
+  done
+fi
 cursor --install-extension "$VSIX"
 
 # 4. reload Cursor window so the new extension activates
