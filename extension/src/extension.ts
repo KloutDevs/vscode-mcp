@@ -54,7 +54,7 @@ function startServer(context: vscode.ExtensionContext) {
   const port = vscode.workspace.getConfiguration("cursorMcpBridge").get<number>("port", 9421);
 
   server = http.createServer((req, res) => {
-    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Access-Control-Allow-Origin", "*");
 
     if (req.method === "OPTIONS") {
@@ -64,6 +64,7 @@ function startServer(context: vscode.ExtensionContext) {
     }
 
     let body = "";
+    req.setEncoding("utf8");
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       handleRequest(req, res, body).catch((err) => {
@@ -124,7 +125,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.0.5",
+      version: "1.0.6",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -334,8 +335,9 @@ async function tryCommands(
 }
 
 function json(res: http.ServerResponse, status: number, data: unknown) {
-  res.writeHead(status);
-  res.end(JSON.stringify(data, null, 2));
+  const payload = Buffer.from(JSON.stringify(data, null, 2), "utf8");
+  res.writeHead(status, { "Content-Length": payload.length });
+  res.end(payload);
 }
 
 function log(msg: string) {
