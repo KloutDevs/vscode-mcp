@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 import * as http from "http";
 import { exec } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
 
 // ─── response state tracking ─────────────────────────────────────────────────
 // We have no direct API to know when Cursor finishes generating a response.
@@ -139,7 +141,7 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.0.7",
+      version: "1.0.8",
       port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 8765),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -177,6 +179,61 @@ async function handleRequest(
     const commands = commandLists[mode] ?? CHAT_OPEN_COMMANDS;
     const result = await tryCommands(commands, message ? { query: message } : undefined);
     return json(res, result.ok ? 200 : 500, result);
+  }
+
+  // ── GET /chat/read ───────────────────────────────────────────────────────────
+  if (route === "GET /chat/read") {
+    const wsPath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!wsPath) return json(res, 400, { error: "No workspace open" });
+
+    // Derive the .cursor/projects slug from the workspace path
+    const slug = wsPath.replace(/[:\\/]+/g, "-").replace(/^-/, "").replace(/-+/g, "-");
+    const userHome = process.env.USERPROFILE ?? process.env.HOME ?? "";
+    const transcriptsDir = path.join(userHome, ".cursor", "projects", slug, "agent-transcripts");
+
+    if (!fs.existsSync(transcriptsDir)) {
+      return json(res, 404, { error: `No transcripts dir: ${transcriptsDir}` });
+    }
+
+    // Find the most recently modified composer transcript
+    const entries = fs.readdirSync(transcriptsDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => {
+        const jsonl = path.join(transcriptsDir, d.name, `${d.name}.jsonl`);
+        const mtime = fs.existsSync(jsonl) ? fs.statSync(jsonl).mtimeMs : 0;
+        return { id: d.name, jsonl, mtime };
+      })
+      .filter((e) => e.mtime > 0)
+      .sort((a, b) => b.mtime - a.mtime);
+
+    if (entries.length === 0) return json(res, 404, { error: "No transcript files found" });
+
+    const { id: composerId, jsonl: jsonlPath } = entries[0];
+    const raw = fs.readFileSync(jsonlPath, "utf-8");
+
+    const messages = raw
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => {
+        try { return JSON.parse(l); } catch { return null; }
+      })
+      .filter(Boolean)
+      .filter((l: Record<string, unknown>) => l.role === "user" || l.role === "assistant")
+      .map((l: Record<string, unknown>) => {
+        const msg = l.message as { content?: Array<{ type: string; text?: string }> };
+        const text = (msg?.content ?? [])
+          .filter((c) => c.type === "text")
+          .map((c) => c.text ?? "")
+          .join("")
+          .replace(/<timestamp>[^<]*<\/timestamp>\s*/g, "")
+          .replace(/<user_query>\s*/g, "")
+          .replace(/<\/user_query>\s*/g, "")
+          .trim();
+        return { role: l.role as string, text };
+      })
+      .filter((m) => m.text);
+
+    return json(res, 200, { composerId, count: messages.length, messages });
   }
 
   // ── GET /chat/status ─────────────────────────────────────────────────────────
@@ -220,11 +277,11 @@ async function handleRequest(
     await vscode.commands.executeCommand("glass.osEditPaste");
     await new Promise((r) => setTimeout(r, 250));
 
-    // Send Enter via WScript.Shell (faster than PowerShell full startup)
-    // The Cursor input is still focused at this point
+    // Re-activate Cursor and send Enter via WScript.Shell
+    // -NoProfile speeds up startup; AppActivate ensures Cursor has focus
     await new Promise<void>((resolve) => {
       exec(
-        `powershell -NonInteractive -WindowStyle Hidden -Command "$wsh = New-Object -ComObject WScript.Shell; $wsh.SendKeys('{ENTER}')"`,
+        `powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "$wsh = New-Object -ComObject WScript.Shell; $wsh.AppActivate('Cursor'); Start-Sleep -Milliseconds 200; $wsh.SendKeys('{ENTER}')"`,
         () => resolve()
       );
     });
