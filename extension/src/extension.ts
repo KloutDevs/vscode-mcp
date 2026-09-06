@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import * as http from "http";
-import { exec } from "child_process";
 import * as fs from "fs";
 import * as nodePath from "path";
+import { keyboard, Key } from "@nut-tree-fork/nut-js";
 import { writeRegistryEntry, removeRegistryEntry } from "./registry.js";
 
 let actualPort = 0;
@@ -121,16 +121,14 @@ function countUserMessages(sinceMs = 0, composerId?: string): { count: number; c
   return { count, composerId: id };
 }
 
-function sendEnterKey(): Promise<void> {
-  return new Promise((resolve) => {
-    // Use workspace-specific window title so we target the right Cursor instance
-    const wsName = getWorkspaceName();
-    const windowTitle = wsName ? `${wsName} - Cursor` : "Cursor";
-    exec(
-      `powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "$wsh = New-Object -ComObject WScript.Shell; $wsh.AppActivate('${windowTitle}'); Start-Sleep -Milliseconds 200; $wsh.SendKeys('{ENTER}')"`,
-      () => resolve()
-    );
-  });
+// NOTE: this presses Enter into whatever window currently has OS focus.
+// Cursor must already be the frontmost/focused window for this to reach
+// the chat input — there is no known way to deliver a keystroke to Cursor
+// without it holding focus, on any OS (confirmed via research, see spec
+// docs/superpowers/specs/2026-09-06-consolidate-cursor-bridge-design.md).
+async function sendEnterKey(): Promise<void> {
+  await keyboard.pressKey(Key.Enter);
+  await keyboard.releaseKey(Key.Enter);
 }
 
 // ─── HTTP server ──────────────────────────────────────────────────────────────

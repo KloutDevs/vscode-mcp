@@ -25,6 +25,9 @@
     "watch": "tsc --watch",
     "package": "npx @vscode/vsce package --no-dependencies"
   },
+  "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.80.0",
