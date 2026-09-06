@@ -7,46 +7,68 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { readFile, writeFile, mkdir, rm, readdir, stat, rename } from "fs/promises";
-import { existsSync, statSync } from "fs";
+import { existsSync, statSync, readFileSync } from "fs";
 import { join, resolve, relative, dirname, basename, extname } from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 import { createReadStream } from "fs";
 import { createInterface } from "readline";
 import { request as httpRequest } from "http";
+import { fileURLToPath } from "url";
 
 const execAsync = promisify(exec);
 
 // ─── bridge helper ───────────────────────────────────────────────────────────
 
-const BRIDGE_PORT = parseInt(process.env.MCP_BRIDGE_PORT ?? "9421", 10);
-
-function bridgeCall(method: string, path: string, body?: unknown): Promise<unknown> {
+function bridgeCall(method: string, path: string, body?: unknown, port?: number, timeoutMs = 310_000): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const payload = body !== undefined ? JSON.stringify(body) : undefined;
     const req = httpRequest(
       {
         hostname: "127.0.0.1",
-        port: BRIDGE_PORT,
+        port: port ?? 9421,
         path,
         method,
+        timeout: timeoutMs,
         headers: {
-          "Content-Type": "application/json",
-          ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}),
+          "Content-Type": "application/json; charset=utf-8",
+          ...(payload ? { "Content-Length": Buffer.byteLength(payload, "utf8") } : {}),
         },
       },
       (res) => {
-        let data = "";
-        res.on("data", (c) => (data += c));
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
         res.on("end", () => {
-          try { resolve(JSON.parse(data)); } catch { resolve(data); }
+          try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); }
+          catch { resolve(Buffer.concat(chunks).toString("utf8")); }
         });
       }
     );
     req.on("error", reject);
-    if (payload) req.write(payload);
+    req.on("timeout", () => { req.destroy(); reject(new Error("bridge timeout")); });
+    if (payload) req.write(payload, "utf8");
     req.end();
   });
+}
+
+function readRegistry(): Record<string, { workspace: string; pid: number; startedAt: number }> {
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
+  const path = join(home, ".vscode-mcp-bridge", "registry.json");
+  if (!existsSync(path)) return {};
+  try {
+    return JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const server = new Server(
@@ -324,113 +346,162 @@ const TOOLS: Tool[] = [
 
   // ── Cursor bridge tools (require the cursor-mcp-bridge extension running) ──
   {
-    name: "cursor_status",
-    description: "Check if the Cursor MCP Bridge extension is running and get workspace info.",
+    name: "cursor_list_workspaces",
+    description: "Discover all active Cursor bridge instances by reading the shared registry file. Returns each open Cursor window with its workspace name and port. Use when multiple Cursor projects are open simultaneously.",
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "cursor_status",
+    description: "Check if the Cursor MCP bridge is running on a given port. Use cursor_list_workspaces to find the right port.",
+    inputSchema: {
+      type: "object",
+      properties: { port: { type: "number", description: "Bridge port from cursor_list_workspaces" } },
+      required: ["port"],
+    },
+  },
+  {
     name: "cursor_list_commands",
-    description: "List Cursor/VS Code commands available in the IDE. Use filter to narrow results.",
+    description: "List Cursor/VS Code commands available in a given window. Use filter to narrow results.",
     inputSchema: {
       type: "object",
       properties: {
-        filter: { type: "string", description: "Optional keyword filter (e.g. 'chat', 'model', 'cursor')" },
+        port: { type: "number", description: "Bridge port" },
+        filter: { type: "string", description: "Optional keyword filter (e.g. 'chat', 'model', 'glass')" },
       },
+      required: ["port"],
     },
   },
   {
     name: "cursor_open_chat",
-    description: "Open a new chat, composer, or agent panel in Cursor.",
+    description: "Open a new chat, composer, or agent panel in a Cursor window. Returns since_ms, workspace and port — store them to scope all subsequent calls to this session.",
     inputSchema: {
       type: "object",
       properties: {
-        mode: {
-          type: "string",
-          enum: ["chat", "composer", "agent"],
-          description: "Which panel to open (default: chat)",
-        },
-        message: { type: "string", description: "Optional initial message to send" },
+        port: { type: "number", description: "Bridge port from cursor_list_workspaces" },
+        mode: { type: "string", enum: ["chat", "composer", "agent"], description: "Panel to open (default: agent)" },
       },
+      required: ["port"],
     },
   },
   {
-    name: "cursor_send_message",
-    description: "Open the Cursor chat and send a message (starts a new conversation).",
+    name: "cursor_send_and_wait",
+    description: "Send a message to the active Cursor agent in a given window and block until Cursor finishes responding. Uses fs.watch on the JSONL transcript — resolves the instant Cursor writes a final (non-tool-use) assistant message. No polling.",
     inputSchema: {
       type: "object",
       properties: {
-        message: { type: "string", description: "Message to send in the chat" },
+        port:       { type: "number", description: "Bridge port from cursor_list_workspaces or cursor_open_chat" },
+        message:    { type: "string", description: "Message to send" },
+        since_ms:   { type: "number", description: "Timestamp from cursor_open_chat to scope this session" },
+        timeout_ms: { type: "number", description: "Safety-valve timeout in ms (default 300000)" },
       },
-      required: ["message"],
+      required: ["port", "message", "since_ms"],
+    },
+  },
+  {
+    name: "cursor_send",
+    description: "Send a message to a Cursor window and return as soon as it's confirmed in the transcript (no waiting for Cursor's reply). On first call pass since_ms; after that pass composer_id for targeted, session-isolated delivery to a specific agent tab.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        port:        { type: "number", description: "Bridge port" },
+        message:     { type: "string", description: "Message to send" },
+        since_ms:    { type: "number", description: "Timestamp from cursor_open_chat — used only when composer_id is unknown" },
+        composer_id: { type: "string", description: "Composer ID returned by a previous cursor_send call — use this for all messages after the first, to target a specific agent tab" },
+      },
+      required: ["port", "message"],
+    },
+  },
+  {
+    name: "cursor_read_chat",
+    description: "Read the conversation history of a Cursor agent session. Pass composer_id for direct, unambiguous access to a specific tab.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        port:        { type: "number", description: "Bridge port" },
+        composer_id: { type: "string", description: "Composer ID from cursor_send response — preferred over since_ms" },
+        since_ms:    { type: "number", description: "Fallback: filter transcripts by creation time" },
+      },
+      required: ["port"],
     },
   },
   {
     name: "cursor_get_model",
-    description: "Get the currently configured AI model in Cursor.",
-    inputSchema: { type: "object", properties: {} },
+    description: "Get the currently configured AI model in a Cursor window.",
+    inputSchema: {
+      type: "object",
+      properties: { port: { type: "number", description: "Bridge port" } },
+      required: ["port"],
+    },
   },
   {
     name: "cursor_set_model",
-    description: "Change the active AI model in Cursor (e.g. claude-sonnet-4-5, gpt-4o, gemini-pro).",
+    description: "Change the active AI model in a Cursor window (e.g. claude-sonnet-4-5, gpt-4o).",
     inputSchema: {
       type: "object",
       properties: {
-        model: { type: "string", description: "Model identifier to set" },
+        port:  { type: "number", description: "Bridge port" },
+        model: { type: "string", description: "Model slug to activate" },
       },
-      required: ["model"],
+      required: ["port", "model"],
     },
   },
   {
     name: "cursor_open_model_picker",
-    description: "Open the model selector UI in Cursor so the user can pick a model visually.",
-    inputSchema: { type: "object", properties: {} },
-  },
-  {
-    name: "cursor_send_and_wait",
-    description: "Send a message to the current Cursor agent chat and wait (blocking) until Cursor finishes responding. Returns the full response text. Use since_ms from cursor_open_chat to scope to the current session.",
+    description: "Open the model selector UI in a Cursor window so the user can pick a model visually.",
     inputSchema: {
       type: "object",
-      properties: {
-        message:    { type: "string", description: "Message to send" },
-        since_ms:   { type: "number", description: "Unix ms timestamp — only look at transcripts created after this (use the value returned by cursor_open_chat)" },
-        timeout_ms: { type: "number", description: "Max ms to wait for Cursor's response (default 300000 = 5 min)" },
-      },
-      required: ["message", "since_ms"],
+      properties: { port: { type: "number", description: "Bridge port" } },
+      required: ["port"],
     },
   },
   {
     name: "cursor_open_file",
-    description: "Open a file in the Cursor editor, optionally jumping to a specific line.",
+    description: "Open a file in a Cursor window's editor, optionally jumping to a specific line.",
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Absolute file path to open" },
-        line: { type: "number", description: "Line number to jump to (1-indexed)" },
+        port: { type: "number", description: "Bridge port" },
+        path: { type: "string", description: "Absolute file path" },
+        line: { type: "number", description: "Line number (1-indexed)" },
       },
-      required: ["path"],
+      required: ["port", "path"],
     },
   },
   {
     name: "cursor_editor_state",
-    description: "Get the current editor state: active file, cursor position, selected text, open editors.",
-    inputSchema: { type: "object", properties: {} },
+    description: "Get the currently active editor in a Cursor window: file path, cursor position, selected text, open editors.",
+    inputSchema: {
+      type: "object",
+      properties: { port: { type: "number", description: "Bridge port" } },
+      required: ["port"],
+    },
   },
   {
     name: "cursor_diagnostics",
-    description: "Get all errors and warnings (diagnostics) from the IDE's language servers.",
-    inputSchema: { type: "object", properties: {} },
+    description: "Get all errors and warnings from a Cursor window's language servers.",
+    inputSchema: {
+      type: "object",
+      properties: { port: { type: "number", description: "Bridge port" } },
+      required: ["port"],
+    },
   },
   {
     name: "cursor_run_command",
-    description: "Execute any VS Code / Cursor command by its ID. Use cursor_list_commands to discover IDs.",
+    description: "Execute any VS Code / Cursor command by ID in a given window. Use cursor_list_commands to discover IDs.",
     inputSchema: {
       type: "object",
       properties: {
-        command: { type: "string", description: "Command ID (e.g. 'workbench.action.reloadWindow')" },
-        args: { type: "array", description: "Optional arguments to pass to the command" },
+        port:    { type: "number", description: "Bridge port" },
+        command: { type: "string", description: "Command ID" },
+        args:    { type: "array",  description: "Optional arguments" },
       },
-      required: ["command"],
+      required: ["port", "command"],
     },
+  },
+  {
+    name: "cursor_deploy_extension",
+    description: "Build, package, install and reload the cursor-mcp-bridge extension in one shot. Run this after any change to the extension source.",
+    inputSchema: { type: "object", properties: {} },
   },
 ];
 
@@ -600,57 +671,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── Cursor bridge tools ───────────────────────────────────────────────
 
+      case "cursor_list_workspaces": {
+        const registry = readRegistry();
+        const results = Object.entries(registry)
+          .filter(([, entry]) => isPidAlive(entry.pid))
+          .map(([port, entry]) => ({ port: Number(port), workspace: entry.workspace }));
+        return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+      }
+
       case "cursor_status": {
-        try {
-          const result = await bridgeCall("GET", "/status");
-          return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-        } catch {
-          return {
-            content: [{ type: "text", text: "Bridge not reachable. Make sure cursor-mcp-bridge extension is installed and Cursor is running." }],
-            isError: true,
-          };
-        }
+        const result = await bridgeCall("GET", "/status", undefined, a.port as number, 10_000);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 
       case "cursor_list_commands": {
         const filter = (a.filter as string | undefined) ?? "";
         const qs = filter ? `?filter=${encodeURIComponent(filter)}` : "";
-        const result = await bridgeCall("GET", `/commands${qs}`);
+        const result = await bridgeCall("GET", `/commands${qs}`, undefined, a.port as number);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 
       case "cursor_open_chat": {
+        const port = a.port as number;
         const openedAt = Date.now();
-        const result = await bridgeCall("POST", "/chat/open", {
-          mode: (a.mode as string | undefined) ?? "chat",
-          message: a.message as string | undefined,
-        });
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ ...(result as object), since_ms: openedAt }, null, 2),
-          }],
-        };
-      }
-
-      case "cursor_send_message": {
-        const result = await bridgeCall("POST", "/chat/send", { message: a.message as string });
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      }
-
-      case "cursor_get_model": {
-        const result = await bridgeCall("GET", "/model/current");
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      }
-
-      case "cursor_set_model": {
-        const result = await bridgeCall("POST", "/model/set", { model: a.model as string });
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
-      }
-
-      case "cursor_open_model_picker": {
-        const result = await bridgeCall("POST", "/model/picker");
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        const result = await bridgeCall("POST", "/chat/open", { mode: (a.mode as string | undefined) ?? "agent" }, port, 10_000) as Record<string, unknown>;
+        return { content: [{ type: "text", text: JSON.stringify({ ...result, since_ms: openedAt, port }, null, 2) }] };
       }
 
       case "cursor_send_and_wait": {
@@ -658,45 +703,77 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           message:    a.message as string,
           since_ms:   a.since_ms as number,
           timeout_ms: (a.timeout_ms as number | undefined) ?? 300_000,
-        }) as { ok?: boolean; response?: string; text?: string; composerId?: string; error?: string; waited_ms?: number };
+        }, a.port as number, ((a.timeout_ms as number | undefined) ?? 300_000) + 5_000) as { ok?: boolean; text?: string; error?: string; waited_ms?: number };
 
         if (!result.ok) {
           return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
         }
+        return { content: [{ type: "text", text: `**Cursor** (${result.waited_ms}ms):\n\n${result.text}` }] };
+      }
 
-        const response = result.text ?? result.response ?? "";
-        return {
-          content: [{
-            type: "text",
-            text: `**Cursor respondió** (waited ${result.waited_ms}ms):\n\n${response}`,
-          }],
-        };
+      case "cursor_send": {
+        const port = a.port as number;
+        const result = await bridgeCall("POST", "/chat/send", {
+          message:     a.message,
+          since_ms:    a.since_ms,
+          composer_id: a.composer_id,
+        }, port, 65_000) as { ok?: boolean; confirmed?: boolean; composerId?: string; workspace?: string; attempt?: number; error?: string };
+        if (!result.ok || !result.confirmed) {
+          return { content: [{ type: "text", text: `Error: ${result.error ?? "send not confirmed"}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ confirmed: true, composer_id: result.composerId, workspace: result.workspace, port, attempt: result.attempt }) }] };
+      }
+
+      case "cursor_read_chat": {
+        const port = a.port as number;
+        const composerId = a.composer_id as string | undefined;
+        const qs = composerId ? `?composer_id=${encodeURIComponent(composerId)}` : `?since=${a.since_ms ?? 0}`;
+        const result = await bridgeCall("GET", `/chat/read${qs}`, undefined, port, 10_000);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_get_model": {
+        const result = await bridgeCall("GET", "/model/current", undefined, a.port as number);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_set_model": {
+        const result = await bridgeCall("POST", "/model/set", { model: a.model as string }, a.port as number);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_open_model_picker": {
+        const result = await bridgeCall("POST", "/model/picker", undefined, a.port as number);
+        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 
       case "cursor_open_file": {
-        const result = await bridgeCall("POST", "/editor/open", {
-          path: a.path as string,
-          line: a.line as number | undefined,
-        });
+        const result = await bridgeCall("POST", "/editor/open", { path: a.path, line: a.line }, a.port as number);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 
       case "cursor_editor_state": {
-        const result = await bridgeCall("GET", "/editor/state");
+        const result = await bridgeCall("GET", "/editor/state", undefined, a.port as number);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 
       case "cursor_diagnostics": {
-        const result = await bridgeCall("GET", "/diagnostics");
+        const result = await bridgeCall("GET", "/diagnostics", undefined, a.port as number);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       }
 
       case "cursor_run_command": {
-        const result = await bridgeCall("POST", "/command", {
-          command: a.command as string,
-          args: a.args as unknown[] | undefined,
-        });
+        const result = await bridgeCall("POST", "/command", { command: a.command, args: a.args }, a.port as number);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      }
+
+      case "cursor_deploy_extension": {
+        const { exec: execCb } = await import("child_process");
+        const { promisify: promisifyFn } = await import("util");
+        const execDeployAsync = promisifyFn(execCb);
+        const scriptPath = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "deploy.sh");
+        const { stdout, stderr } = await execDeployAsync(`bash "${scriptPath}"`, { timeout: 120_000 });
+        return { content: [{ type: "text", text: stdout || stderr }] };
       }
 
       default:
