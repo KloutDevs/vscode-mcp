@@ -62,9 +62,9 @@ Sequential dependency chain: 1 → 2 → 3 → 5 → 6 → 7 → 8. Task 4 has n
   - Parallel: Yes, with Task 8 (disjoint files, both depend only on Task 6 being complete).
   - Commit: `docs: document the consolidated client and cross-platform bridge`.
 
-- [ ] 8. Mark `nexus-mcp` and `klout-mcp` as archived
+- [x] 8. Mark `nexus-mcp` and `klout-mcp` as archived
   - [x] Create `../nexus-mcp/README.md` with an archival notice pointing to `vscode-mcp` (committed in that repo).
-  - [ ] Create `../klout-mcp/README.md` with the equivalent notice (adjusted: klout-mcp was an earlier iteration of nexus-mcp) — BLOCKED: `~/Desktop/Trabajo/KloutDevs/klout-mcp` does not exist on this machine.
+  - [x] Create `../klout-mcp/README.md` with the equivalent notice (adjusted: klout-mcp was an earlier iteration of nexus-mcp) — repo cloned locally and committed (commit `362bf23`).
   - Commit each repo separately; do not push any of the three repos without asking first.
   - Requirements: proposal scope item "Archive `nexus-mcp` and `klout-mcp` via README notice" (no dedicated capability spec — archival is process, not a runtime capability).
   - Parallel: Yes, with Task 7 (disjoint files/repos, both depend only on Task 6 being complete).
