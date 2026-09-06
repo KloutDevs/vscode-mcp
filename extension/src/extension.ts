@@ -3,6 +3,9 @@ import * as http from "http";
 import { exec } from "child_process";
 import * as fs from "fs";
 import * as nodePath from "path";
+import { writeRegistryEntry, removeRegistryEntry } from "./registry.js";
+
+let actualPort = 0;
 
 // ─── response state tracking ─────────────────────────────────────────────────
 // We have no direct API to know when Cursor finishes generating a response.
@@ -133,8 +136,6 @@ function sendEnterKey(): Promise<void> {
 // ─── HTTP server ──────────────────────────────────────────────────────────────
 
 function startServer(context: vscode.ExtensionContext) {
-  const port = vscode.workspace.getConfiguration("cursorMcpBridge").get<number>("port", 9421);
-
   server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -159,17 +160,18 @@ function startServer(context: vscode.ExtensionContext) {
     });
   });
 
-  server.listen(port, "127.0.0.1", () => {
-    log(`Bridge listening on http://127.0.0.1:${port}`);
-    statusBarItem.text = `$(radio-tower) MCP :${port}`;
-    statusBarItem.tooltip = `Cursor MCP Bridge active on port ${port}`;
+  server.listen(0, "127.0.0.1", () => {
+    const address = server?.address();
+    actualPort = typeof address === "object" && address ? address.port : 0;
+    writeRegistryEntry(actualPort, getWorkspaceName(), process.pid);
+    log(`Bridge listening on http://127.0.0.1:${actualPort}`);
+    statusBarItem.text = `$(radio-tower) MCP :${actualPort}`;
+    statusBarItem.tooltip = `Cursor MCP Bridge active on port ${actualPort}`;
     statusBarItem.show();
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {
-    const msg = err.code === "EADDRINUSE"
-      ? `Port ${port} already in use. Change cursorMcpBridge.port in settings.`
-      : `Server error: ${err.message}`;
+    const msg = `Server error: ${err.message}`;
     log(msg);
     vscode.window.showErrorMessage(`MCP Bridge: ${msg}`);
     statusBarItem.text = `$(error) MCP Bridge error`;
@@ -178,6 +180,7 @@ function startServer(context: vscode.ExtensionContext) {
 }
 
 function stopServer() {
+  if (actualPort) removeRegistryEntry(actualPort);
   server?.close();
   server = null;
 }
@@ -207,8 +210,8 @@ async function handleRequest(
   if (route === "GET /status") {
     return json(res, 200, {
       active: true,
-      version: "1.1.3",
-      port: vscode.workspace.getConfiguration("cursorMcpBridge").get("port", 9421),
+      version: "2.0.0",
+      port: actualPort,
       workspace: getWorkspaceName(),
       workspaceFolders: vscode.workspace.workspaceFolders?.map((f) => f.uri.fsPath) ?? [],
     });
@@ -694,7 +697,7 @@ function log(msg: string) {
 }
 
 function showStatus() {
-  const port = vscode.workspace.getConfiguration("cursorMcpBridge").get<number>("port", 9421);
+  const port = actualPort;
   outputChannel.show();
   outputChannel.appendLine(`\nStatus: server running on http://127.0.0.1:${port}`);
   outputChannel.appendLine(`Available endpoints:`);

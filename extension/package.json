@@ -18,17 +18,7 @@
         "command": "cursorMcpBridge.restart",
         "title": "MCP Bridge: Restart HTTP Server"
       }
-    ],
-    "configuration": {
-      "title": "Cursor MCP Bridge",
-      "properties": {
-        "cursorMcpBridge.port": {
-          "type": "number",
-          "default": 9421,
-          "description": "Port for the local HTTP bridge server"
-        }
-      }
-    }
+    ]
   },
   "scripts": {
     "build": "tsc",
