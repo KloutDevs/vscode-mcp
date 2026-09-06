@@ -1,0 +1,52 @@
+schema: spec-driven
+
+context: |
+  Tech stack: TypeScript (strict) on Node.js >=18, compiled with tsc.
+  Two projects: root MCP server (@modelcontextprotocol/sdk) and extension/ VS Code/Cursor extension.
+  They communicate over a local HTTP bridge (default port 9421).
+  No test runner, linter, or formatter configured in either project.
+  Style: ES modules (root, type: module) vs CommonJS (extension).
+
+projects:
+  - path: .
+    stack: "Node.js + TypeScript (ESM), MCP server"
+    test_command: null
+    build_command: "npm run build"
+    lint_command: null
+    format_command: null
+  - path: extension
+    stack: "TypeScript (CommonJS), VS Code/Cursor extension"
+    test_command: null
+    build_command: "npm run build"
+    lint_command: null
+    format_command: null
+
+strict_tdd: false
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - State whether a change touches the root MCP server, the extension, or the HTTP bridge contract between them
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale
+    - Call out any change to the HTTP bridge port/protocol as a breaking-change risk
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+    - Split root MCP server work from extension work into separate tasks when both are touched
+  apply:
+    guidelines:
+      - Follow existing code patterns
+      - Root project uses ESM (type: module); extension uses CommonJS — do not mix module syntax
+    tdd: false
+    test_command: ""
+  verify:
+    test_command: ""
+    build_command: "npm run build"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
