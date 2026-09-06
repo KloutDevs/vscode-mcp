@@ -20,7 +20,11 @@ echo "      Packaged: cursor-mcp-bridge-$VERSION.vsix"
 
 # 3. remove old versions + install new one
 echo "[3/4] Cleaning old versions and installing $VERSION..."
-EXTENSIONS_DIR="$USERPROFILE/.cursor/extensions"
+if [ -n "$USERPROFILE" ]; then
+  EXTENSIONS_DIR="$USERPROFILE/.cursor/extensions"
+else
+  EXTENSIONS_DIR="$HOME/.cursor/extensions"
+fi
 if [ -d "$EXTENSIONS_DIR" ]; then
   for old in "$EXTENSIONS_DIR"/kloutdevs.cursor-mcp-bridge-*; do
     [ -d "$old" ] && [ "$(basename "$old")" != "kloutdevs.cursor-mcp-bridge-$VERSION" ] && rm -rf "$old" && echo "      Removed $(basename "$old")"
