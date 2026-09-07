@@ -15,8 +15,12 @@ import { createReadStream } from "fs";
 import { createInterface } from "readline";
 import { request as httpRequest } from "http";
 import { fileURLToPath } from "url";
+import * as cdp from "./cdp.js";
+import * as composerStore from "./composerStore.js";
 
 const execAsync = promisify(exec);
+
+const CURSOR_CDP_PORT = Number(process.env.CURSOR_CDP_PORT ?? 9222);
 
 // ─── bridge helper ───────────────────────────────────────────────────────────
 
@@ -49,26 +53,6 @@ function bridgeCall(method: string, path: string, body?: unknown, port?: number,
     if (payload) req.write(payload, "utf8");
     req.end();
   });
-}
-
-function readRegistry(): Record<string, { workspace: string; pid: number; startedAt: number }> {
-  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
-  const path = join(home, ".vscode-mcp-bridge", "registry.json");
-  if (!existsSync(path)) return {};
-  try {
-    return JSON.parse(readFileSync(path, "utf-8"));
-  } catch {
-    return {};
-  }
-}
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 const server = new Server(
@@ -347,7 +331,7 @@ const TOOLS: Tool[] = [
   // ── Cursor bridge tools (require the cursor-mcp-bridge extension running) ──
   {
     name: "cursor_list_workspaces",
-    description: "Discover all active Cursor bridge instances by reading the shared registry file. Returns each open Cursor window with its workspace name and port. Use when multiple Cursor projects are open simultaneously.",
+    description: "Discover all open Cursor windows via the CDP debug port (/json/list). Returns each window's title and CDP page ID. Use when multiple Cursor projects are open simultaneously. Requires Cursor launched with --remote-debugging-port (see CURSOR_CDP_PORT).",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -385,43 +369,40 @@ const TOOLS: Tool[] = [
   },
   {
     name: "cursor_send_and_wait",
-    description: "Send a message to the active Cursor agent in a given window and block until Cursor finishes responding. Uses fs.watch on the JSONL transcript — resolves the instant Cursor writes a final (non-tool-use) assistant message. No polling.",
+    description: "Send a message via CDP trusted input to a Cursor window/tab and block until the agent's response is marked \"completed\" in state.vscdb (no HTTP polling, no fs.watch). On first call pass page_id from cursor_list_workspaces; after that pass composer_id for targeted, session-isolated delivery to a specific agent tab.",
     inputSchema: {
       type: "object",
       properties: {
-        port:       { type: "number", description: "Bridge port from cursor_list_workspaces or cursor_open_chat" },
-        message:    { type: "string", description: "Message to send" },
-        since_ms:   { type: "number", description: "Timestamp from cursor_open_chat to scope this session" },
-        timeout_ms: { type: "number", description: "Safety-valve timeout in ms (default 300000)" },
+        page_id:     { type: "string", description: "CDP page ID from cursor_list_workspaces — identifies the target Cursor window" },
+        message:     { type: "string", description: "Message to send" },
+        composer_id: { type: "string", description: "Composer ID from a previous cursor_send/cursor_send_and_wait call — targets a specific agent tab" },
+        timeout_ms:  { type: "number", description: "Safety-valve timeout in ms (default 300000)" },
       },
-      required: ["port", "message", "since_ms"],
+      required: ["page_id", "message"],
     },
   },
   {
     name: "cursor_send",
-    description: "Send a message to a Cursor window and return as soon as it's confirmed in the transcript (no waiting for Cursor's reply). On first call pass since_ms; after that pass composer_id for targeted, session-isolated delivery to a specific agent tab.",
+    description: "Send a message via CDP trusted input to a Cursor window/tab and return as soon as it's delivered (no waiting for Cursor's reply). On first call pass page_id from cursor_list_workspaces; after that pass composer_id for targeted, session-isolated delivery to a specific agent tab.",
     inputSchema: {
       type: "object",
       properties: {
-        port:        { type: "number", description: "Bridge port" },
+        page_id:     { type: "string", description: "CDP page ID from cursor_list_workspaces — identifies the target Cursor window" },
         message:     { type: "string", description: "Message to send" },
-        since_ms:    { type: "number", description: "Timestamp from cursor_open_chat — used only when composer_id is unknown" },
         composer_id: { type: "string", description: "Composer ID returned by a previous cursor_send call — use this for all messages after the first, to target a specific agent tab" },
       },
-      required: ["port", "message"],
+      required: ["page_id", "message"],
     },
   },
   {
     name: "cursor_read_chat",
-    description: "Read the conversation history of a Cursor agent session. Pass composer_id for direct, unambiguous access to a specific tab.",
+    description: "Read the conversation history of a Cursor agent session directly from state.vscdb (no HTTP call to the extension). Pass composer_id for direct, unambiguous access to a specific tab.",
     inputSchema: {
       type: "object",
       properties: {
-        port:        { type: "number", description: "Bridge port" },
-        composer_id: { type: "string", description: "Composer ID from cursor_send response — preferred over since_ms" },
-        since_ms:    { type: "number", description: "Fallback: filter transcripts by creation time" },
+        composer_id: { type: "string", description: "Composer ID from cursor_send response" },
       },
-      required: ["port"],
+      required: ["composer_id"],
     },
   },
   {
@@ -672,10 +653,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ── Cursor bridge tools ───────────────────────────────────────────────
 
       case "cursor_list_workspaces": {
-        const registry = readRegistry();
-        const results = Object.entries(registry)
-          .filter(([, entry]) => isPidAlive(entry.pid))
-          .map(([port, entry]) => ({ port: Number(port), workspace: entry.workspace }));
+        const pages = await cdp.listPages(CURSOR_CDP_PORT);
+        const results = pages.map((p) => ({ page_id: p.pageId, title: p.title }));
         return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
       }
 
@@ -699,37 +678,71 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "cursor_send_and_wait": {
-        const result = await bridgeCall("POST", "/chat/send_and_wait", {
-          message:    a.message as string,
-          since_ms:   a.since_ms as number,
-          timeout_ms: (a.timeout_ms as number | undefined) ?? 300_000,
-        }, a.port as number, ((a.timeout_ms as number | undefined) ?? 300_000) + 5_000) as { ok?: boolean; text?: string; error?: string; waited_ms?: number };
+        const pageId = a.page_id as string;
+        const message = a.message as string;
+        const timeoutMs = (a.timeout_ms as number | undefined) ?? 300_000;
+        let composerId = a.composer_id as string | undefined;
+        const startedAt = Date.now();
 
-        if (!result.ok) {
-          return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+        try {
+          let sinceCount = 0;
+          if (composerId) {
+            const before = composerStore.readComposerData(composerId);
+            sinceCount = before?.fullConversationHeadersOnly.length ?? 0;
+            await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
+          } else {
+            const baseline = composerStore.findNewestComposerId();
+            await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
+            composerId = await composerStore.waitForNewComposerId(baseline, timeoutMs);
+            sinceCount = 0;
+          }
+
+          const text = await composerStore.waitForReply(composerId, sinceCount, timeoutMs);
+          return {
+            content: [{
+              type: "text",
+              text: `**Cursor** (${Date.now() - startedAt}ms, composer_id: ${composerId}):\n\n${text}`,
+            }],
+          };
+        } catch (err: unknown) {
+          const message2 = err instanceof Error ? err.message : String(err);
+          return { content: [{ type: "text", text: `Error: ${message2}` }], isError: true };
         }
-        return { content: [{ type: "text", text: `**Cursor** (${result.waited_ms}ms):\n\n${result.text}` }] };
       }
 
       case "cursor_send": {
-        const port = a.port as number;
-        const result = await bridgeCall("POST", "/chat/send", {
-          message:     a.message,
-          since_ms:    a.since_ms,
-          composer_id: a.composer_id,
-        }, port, 65_000) as { ok?: boolean; confirmed?: boolean; composerId?: string; workspace?: string; attempt?: number; error?: string };
-        if (!result.ok || !result.confirmed) {
-          return { content: [{ type: "text", text: `Error: ${result.error ?? "send not confirmed"}` }], isError: true };
+        const pageId = a.page_id as string;
+        const message = a.message as string;
+        let composerId = a.composer_id as string | undefined;
+
+        try {
+          if (composerId) {
+            await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
+          } else {
+            const baseline = composerStore.findNewestComposerId();
+            await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
+            composerId = await composerStore.waitForNewComposerId(baseline, 30_000);
+          }
+          return { content: [{ type: "text", text: JSON.stringify({ confirmed: true, composer_id: composerId, page_id: pageId }) }] };
+        } catch (err: unknown) {
+          const message2 = err instanceof Error ? err.message : String(err);
+          return { content: [{ type: "text", text: `Error: ${message2}` }], isError: true };
         }
-        return { content: [{ type: "text", text: JSON.stringify({ confirmed: true, composer_id: result.composerId, workspace: result.workspace, port, attempt: result.attempt }) }] };
       }
 
       case "cursor_read_chat": {
-        const port = a.port as number;
-        const composerId = a.composer_id as string | undefined;
-        const qs = composerId ? `?composer_id=${encodeURIComponent(composerId)}` : `?since=${a.since_ms ?? 0}`;
-        const result = await bridgeCall("GET", `/chat/read${qs}`, undefined, port, 10_000);
-        return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+        const composerId = a.composer_id as string;
+        const data = composerStore.readComposerData(composerId);
+        if (!data) {
+          return { content: [{ type: "text", text: `Error: no conversation found for composer ${composerId}` }], isError: true };
+        }
+        const messages = data.fullConversationHeadersOnly
+          .map((h) => {
+            const bubble = composerStore.readBubble(composerId, h.bubbleId);
+            return bubble ? { type: bubble.type, text: bubble.text } : null;
+          })
+          .filter((m): m is { type: number; text: string } => m !== null && m.text.length > 0);
+        return { content: [{ type: "text", text: JSON.stringify({ composerId, status: data.status, count: messages.length, messages }, null, 2) }] };
       }
 
       case "cursor_get_model": {

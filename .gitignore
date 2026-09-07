@@ -3,3 +3,5 @@ dist/
 *.js.map
 .env
 .DS_Store
+*.vsix
+.atl/.skill-registry.cache.json
