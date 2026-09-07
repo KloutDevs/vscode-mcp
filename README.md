@@ -1,4 +1,4 @@
-# vscode-mcp
+# cursor-bridge
 
 An MCP (Model Context Protocol) server that gives Claude IDE capabilities inside VS Code and Cursor. Claude can read, write, edit, search, and run commands in your workspace — directly from the chat.
 
@@ -47,7 +47,7 @@ An MCP (Model Context Protocol) server that gives Claude IDE capabilities inside
 
 `cursor_send`, `cursor_send_and_wait`, `cursor_read_chat`, and `cursor_list_workspaces` connect to Cursor's native Chrome DevTools Protocol debug port. Cursor must be relaunched with `--remote-debugging-port` for these to work — the flag cannot be enabled while Cursor is already running.
 
-Set the `CURSOR_CDP_PORT` environment variable if you use a non-default port (default `9222`) when running the `vscode-mcp` server — see the MCP server config examples below (`env` field).
+Set the `CURSOR_CDP_PORT` environment variable if you use a non-default port (default `9222`) when running the `cursor-bridge` server — see the MCP server config examples below (`env` field).
 
 **macOS** — quit Cursor fully, then relaunch from a terminal:
 
@@ -105,9 +105,9 @@ Add to your Cursor MCP config:
 ```json
 {
   "mcpServers": {
-    "vscode-mcp": {
+    "cursor-bridge": {
       "command": "node",
-      "args": ["/absolute/path/to/vscode-mcp/dist/index.js"],
+      "args": ["/absolute/path/to/cursor-bridge/dist/index.js"],
       "env": { "CURSOR_CDP_PORT": "9222" }
     }
   }
@@ -121,9 +121,9 @@ Add to your Cursor MCP config:
 ```json
 {
   "mcpServers": {
-    "vscode-mcp": {
+    "cursor-bridge": {
       "command": "npx",
-      "args": ["--yes", "vscode-mcp"]
+      "args": ["--yes", "cursor-bridge"]
     }
   }
 }
@@ -138,10 +138,10 @@ Add to your VS Code `settings.json`:
 ```json
 "mcp": {
   "servers": {
-    "vscode-mcp": {
+    "cursor-bridge": {
       "type": "stdio",
       "command": "node",
-      "args": ["/absolute/path/to/vscode-mcp/dist/index.js"]
+      "args": ["/absolute/path/to/cursor-bridge/dist/index.js"]
     }
   }
 }

@@ -1,7 +1,7 @@
 {
-  "name": "vscode-mcp",
+  "name": "cursor-bridge",
   "version": "1.0.0",
-  "description": "MCP server that gives Claude IDE capabilities for VS Code and Cursor",
+  "description": "MCP server that gives Claude Code control over Cursor's chat/agent panels via CDP, plus workspace filesystem tools",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "prepare": "npm run build"
   },
   "bin": {
-    "vscode-mcp": "./dist/index.js"
+    "cursor-bridge": "./dist/index.js"
   },
   "keywords": ["mcp", "vscode", "cursor", "claude", "ide", "modelcontextprotocol"],
   "license": "MIT",
