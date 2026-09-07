@@ -2,61 +2,30 @@
 
 ## Purpose
 
-Replace fixed/scanned bridge ports with OS-assigned ephemeral ports published to a shared on-disk registry, so any number of Cursor windows can be discovered reliably without port collisions or hardcoded ranges.
+Discover open Cursor windows using Chrome DevTools Protocol (`/json/list` endpoint) instead of OS-assigned ephemeral ports and on-disk registry files, enabling reliable multi-window discovery without registry state management.
 
 ## Requirements
 
-### Requirement: Ephemeral port binding
+### Requirement: CDP-based window discovery
 
-The bridge extension MUST bind an OS-assigned ephemeral port (`listen(0, ...)`) instead of a fixed or configured port.
+The client MUST discover open Cursor windows by querying `GET http://127.0.0.1:<debugPort>/json/list` on the configured CDP debug port and filtering entries where `type === "page"`, rather than reading any on-disk registry.
 
-#### Scenario: Extension activates
+#### Scenario: Two Cursor windows open
 
-- GIVEN the `cursor-mcp-bridge` extension activates in a Cursor window
-- WHEN it starts its HTTP server
-- THEN the OS assigns a free port and no fixed port (e.g. 9421) is required
-- AND the extension's configurable port setting no longer exists
+- GIVEN two Cursor windows are open under the same debug-enabled process
+- WHEN the client queries `/json/list`
+- THEN the response includes one `page` entry per window, each with a `title` (revealing the workspace) and an `id` usable for `Target.attachToTarget`
+- AND no file on disk is read for this purpose
 
-### Requirement: Registry file publication
+#### Scenario: A window is closed
 
-On successful bind, the extension MUST write an entry to `~/.vscode-mcp-bridge/registry.json` (`$USERPROFILE` on Windows, `$HOME` on Mac/Linux) containing the bound port as key and an object with `workspace`, `pid`, and `startedAt` fields, preserving existing entries for other windows.
+- GIVEN a Cursor window was open and is then closed
+- WHEN the client queries `/json/list` again
+- THEN that window's entry is absent from the response
+- AND no stale-entry filtering logic is needed, since CDP only reports live pages
 
-#### Scenario: First window starts
+#### Scenario: CDP endpoint unreachable
 
-- GIVEN no registry file exists yet
-- WHEN the extension binds its port
-- THEN the registry file is created with one entry for that window
-
-#### Scenario: Second window starts alongside the first
-
-- GIVEN a registry file already has one entry
-- WHEN a second Cursor window's extension binds its port
-- THEN the registry file contains both entries, and the first entry is unchanged
-
-### Requirement: Registry cleanup on deactivation
-
-The extension MUST remove its own registry entry when it deactivates cleanly.
-
-#### Scenario: Window closes normally
-
-- GIVEN a Cursor window with a registered bridge entry is closed normally
-- WHEN the extension's `deactivate()` runs
-- THEN its entry is removed from the registry file
-- AND other entries remain untouched
-
-### Requirement: Passive dead-PID cleanup on read
-
-The client MUST discard registry entries whose process is no longer alive when reading the registry, rather than relying solely on deactivation cleanup.
-
-#### Scenario: Cursor crashes without deactivating
-
-- GIVEN a registry entry exists for a Cursor process that has crashed or was force-killed
-- WHEN the client reads the registry (e.g. via `cursor_list_workspaces`)
-- THEN that entry is excluded from the returned list because its PID is no longer alive
-- AND the stale entry may remain in the file itself (no file rewrite required by this read)
-
-#### Scenario: Registry file missing or unreadable
-
-- GIVEN the registry file does not exist or contains invalid JSON
-- WHEN the client attempts to read it
-- THEN the client treats it as an empty registry rather than raising an error
+- GIVEN Cursor was not launched with `--remote-debugging-port`
+- WHEN the client queries `/json/list`
+- THEN the request fails and the client reports that CDP discovery is unavailable, rather than falling back to a file-based registry
