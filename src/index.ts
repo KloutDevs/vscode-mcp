@@ -22,6 +22,27 @@ const execAsync = promisify(exec);
 
 const CURSOR_CDP_PORT = Number(process.env.CURSOR_CDP_PORT ?? 9222);
 
+/**
+ * Ask the extension which composer tab is actually selected/focused right
+ * now. This is the reliable way to identify where a CDP send just landed —
+ * state.vscdb's rowid ordering does NOT reliably reflect recency (Cursor
+ * touches unrelated composer rows in the background), confirmed by live
+ * testing: findNewestComposerId() returned a stale/unrelated composer while
+ * the message had actually landed in the tab composer.getOrderedSelectedComposerIds
+ * reports as selected.
+ */
+async function getActiveComposerId(extensionPort = 9421): Promise<string | undefined> {
+  const result = await bridgeCall(
+    "POST",
+    "/command",
+    { command: "composer.getOrderedSelectedComposerIds" },
+    extensionPort,
+    10_000
+  ) as { result?: string[] };
+  const ids = result?.result;
+  return ids && ids.length > 0 ? ids[ids.length - 1] : undefined;
+}
+
 // ─── bridge helper ───────────────────────────────────────────────────────────
 
 function bridgeCall(method: string, path: string, body?: unknown, port?: number, timeoutMs = 310_000): Promise<unknown> {
@@ -691,10 +712,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             sinceCount = before?.fullConversationHeadersOnly.length ?? 0;
             await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
           } else {
-            const baseline = composerStore.findNewestComposerId();
+            const beforeId = await getActiveComposerId();
+            const before = beforeId ? composerStore.readComposerData(beforeId) : null;
             await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
-            composerId = await composerStore.waitForNewComposerId(baseline, timeoutMs);
-            sinceCount = 0;
+            composerId = (await getActiveComposerId()) ?? beforeId;
+            if (!composerId) throw new Error("Could not determine the active composer tab after sending.");
+            sinceCount = composerId === beforeId ? (before?.fullConversationHeadersOnly.length ?? 0) : 0;
           }
 
           const text = await composerStore.waitForReply(composerId, sinceCount, timeoutMs);
@@ -719,9 +742,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (composerId) {
             await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
           } else {
-            const baseline = composerStore.findNewestComposerId();
             await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
-            composerId = await composerStore.waitForNewComposerId(baseline, 30_000);
+            composerId = await getActiveComposerId();
+            if (!composerId) throw new Error("Could not determine the active composer tab after sending.");
           }
           return { content: [{ type: "text", text: JSON.stringify({ confirmed: true, composer_id: composerId, page_id: pageId }) }] };
         } catch (err: unknown) {

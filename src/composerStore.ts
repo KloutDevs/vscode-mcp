@@ -115,43 +115,6 @@ export function readBubble(
 }
 
 /**
- * Return the composerId of the most recently created `composerData:*` row,
- * or null if none exist. Used to detect a brand-new composer/agent tab after
- * a send when no `composer_id` is already known.
- *
- * NOTE: this relies on SQLite's implicit rowid ordering approximating insert
- * recency. It is a best-effort heuristic — the CDP send path itself does not
- * expose the composerId it created, so this needs live-Cursor verification
- * (see design.md Testing Strategy: Integration/E2E rows, manual).
- */
-export function findNewestComposerId(dbPath: string = defaultStateDbPath()): string | null {
-  const db = getDb(dbPath);
-  const stmt = db.prepare("SELECT key FROM cursorDiskKV WHERE key LIKE 'composerData:%' ORDER BY rowid DESC LIMIT 1");
-  const row = stmt.get() as { key?: string } | undefined;
-  if (!row?.key) return null;
-  return row.key.slice("composerData:".length);
-}
-
-/**
- * Poll until a composerId newer than `baselineComposerId` appears, or
- * timeoutMs elapses. Returns the new composerId.
- */
-export async function waitForNewComposerId(
-  baselineComposerId: string | null,
-  timeoutMs: number,
-  dbPath: string = defaultStateDbPath(),
-  pollIntervalMs = 1_000
-): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const current = findNewestComposerId(dbPath);
-    if (current && current !== baselineComposerId) return current;
-    await new Promise((r) => setTimeout(r, pollIntervalMs));
-  }
-  throw new Error(`Timed out after ${timeoutMs}ms waiting for a new composer tab to appear`);
-}
-
-/**
  * Poll state.vscdb until the conversation has a new reply and status is
  * "completed", or timeoutMs elapses. Returns the text of the last non-empty
  * assistant (type !== 2, i.e. not a user bubble) bubble. Never uses fs.watch.
