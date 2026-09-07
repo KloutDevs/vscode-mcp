@@ -5,3 +5,6 @@ dist/
 .DS_Store
 *.vsix
 .atl/.skill-registry.cache.json
+.atl/
+bun.lock
+bun.lockb
