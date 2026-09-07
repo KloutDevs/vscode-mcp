@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import * as http from "http";
 import * as nodePath from "path";
+import { writeRegistryEntry, removeRegistryEntry } from "./registry.js";
 
-const DEFAULT_PORT = 9421;
 let actualPort = 0;
 
 // Known Cursor / VS Code command IDs to try, ordered by likelihood
@@ -84,11 +84,10 @@ function startServer(context: vscode.ExtensionContext) {
     });
   });
 
-  const configuredPort = vscode.workspace.getConfiguration("cursorMcpBridge").get<number>("port") ?? DEFAULT_PORT;
-
-  server.listen(configuredPort, "127.0.0.1", () => {
+  server.listen(0, "127.0.0.1", () => {
     const address = server?.address();
-    actualPort = typeof address === "object" && address ? address.port : configuredPort;
+    actualPort = typeof address === "object" && address ? address.port : 0;
+    writeRegistryEntry(actualPort, getWorkspaceName(), process.pid);
     log(`Bridge listening on http://127.0.0.1:${actualPort}`);
     statusBarItem.text = `$(radio-tower) MCP :${actualPort}`;
     statusBarItem.tooltip = `Cursor MCP Bridge active on port ${actualPort}`;
@@ -105,6 +104,7 @@ function startServer(context: vscode.ExtensionContext) {
 }
 
 function stopServer() {
+  if (actualPort) removeRegistryEntry(actualPort);
   server?.close();
   server = null;
 }

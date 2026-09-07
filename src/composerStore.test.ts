@@ -12,6 +12,7 @@ import {
   readComposerData,
   readBubble,
   waitForReply,
+  extractComposersForWorkspace,
 } from "./composerStore.js";
 
 // ─── pure parsing tests (no I/O) ─────────────────────────────────────────────
@@ -156,4 +157,35 @@ test("waitForReply rejects on timeout when status never reaches completed", asyn
       await assert.rejects(() => waitForReply("composer-3", 0, 150, dbPath, 50), /Timed out/);
     }
   );
+});
+
+test("extractComposersForWorkspace filters by workspace folder basename", () => {
+  const headers = JSON.stringify({
+    allComposers: [
+      {
+        composerId: "a1",
+        name: "Chat A",
+        lastUpdatedAt: 111,
+        unifiedMode: "agent",
+        workspaceIdentifier: { uri: { fsPath: "/Users/nahuel/Desktop/cursor-bridge" } },
+      },
+      {
+        composerId: "a2",
+        name: "Chat B",
+        lastUpdatedAt: 222,
+        unifiedMode: "chat",
+        workspaceIdentifier: { uri: { fsPath: "/Users/nahuel/Desktop/nexus-mcp" } },
+      },
+    ],
+  });
+  const result = extractComposersForWorkspace(headers, "cursor-bridge");
+  assert.deepEqual(result, [
+    { composerId: "a1", name: "Chat A", lastUpdatedAt: 111, unifiedMode: "agent" },
+  ]);
+});
+
+test("extractComposersForWorkspace returns empty array for null/malformed input", () => {
+  assert.deepEqual(extractComposersForWorkspace(null, "cursor-bridge"), []);
+  assert.deepEqual(extractComposersForWorkspace("not json", "cursor-bridge"), []);
+  assert.deepEqual(extractComposersForWorkspace(JSON.stringify({}), "cursor-bridge"), []);
 });

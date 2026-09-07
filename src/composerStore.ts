@@ -98,6 +98,63 @@ function readKey(dbPath: string, key: string): string | null {
   return typeof row.value === "string" ? row.value : row.value.toString("utf8");
 }
 
+function readItemTableKey(dbPath: string, key: string): string | null {
+  const db = getDb(dbPath);
+  const stmt = db.prepare("SELECT value FROM ItemTable WHERE key = ?");
+  const row = stmt.get(key) as { value?: string | Buffer } | undefined;
+  if (!row || row.value === undefined) return null;
+  return typeof row.value === "string" ? row.value : row.value.toString("utf8");
+}
+
+export interface ComposerSummary {
+  composerId: string;
+  name: string | null;
+  lastUpdatedAt: number | null;
+  unifiedMode: string | null;
+}
+
+/** Pure extraction of composer summaries matching a workspace folder basename. */
+export function extractComposersForWorkspace(
+  headersRaw: string | null,
+  workspaceBasename: string
+): ComposerSummary[] {
+  if (!headersRaw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(headersRaw);
+  } catch {
+    return [];
+  }
+  const all = (parsed as { allComposers?: unknown[] })?.allComposers;
+  if (!Array.isArray(all)) return [];
+  return all
+    .filter((c): c is Record<string, unknown> => {
+      if (typeof c !== "object" || c === null) return false;
+      const wi = (c as Record<string, unknown>).workspaceIdentifier as
+        | { uri?: { fsPath?: unknown } }
+        | undefined;
+      const fsPath = wi?.uri?.fsPath;
+      if (typeof fsPath !== "string") return false;
+      return fsPath.split(/[\\/]/).pop() === workspaceBasename;
+    })
+    .map((c) => ({
+      composerId: String(c.composerId ?? ""),
+      name: typeof c.name === "string" ? c.name : null,
+      lastUpdatedAt: typeof c.lastUpdatedAt === "number" ? c.lastUpdatedAt : null,
+      unifiedMode: typeof c.unifiedMode === "string" ? c.unifiedMode : null,
+    }))
+    .filter((c) => c.composerId !== "");
+}
+
+/** List all known composer/agent tabs belonging to a given workspace folder basename. */
+export function listComposersForWorkspace(
+  workspaceBasename: string,
+  dbPath: string = defaultStateDbPath()
+): ComposerSummary[] {
+  const raw = readItemTableKey(dbPath, "composer.composerHeaders");
+  return extractComposersForWorkspace(raw, workspaceBasename);
+}
+
 /** Read a composer's full conversation header list and status from state.vscdb. */
 export function readComposerData(composerId: string, dbPath: string = defaultStateDbPath()): ComposerData | null {
   const raw = readKey(dbPath, `composerData:${composerId}`);

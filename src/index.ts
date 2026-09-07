@@ -17,6 +17,7 @@ import { request as httpRequest } from "http";
 import { fileURLToPath } from "url";
 import * as cdp from "./cdp.js";
 import * as composerStore from "./composerStore.js";
+import * as registry from "./registry.js";
 
 const execAsync = promisify(exec);
 
@@ -31,7 +32,29 @@ const CURSOR_CDP_PORT = Number(process.env.CURSOR_CDP_PORT ?? 9222);
  * the message had actually landed in the tab composer.getOrderedSelectedComposerIds
  * reports as selected.
  */
-async function getActiveComposerId(extensionPort = 9421): Promise<string | undefined> {
+/**
+ * Resolve the extension's HTTP port for the specific window `pageId` refers
+ * to, by looking up its CDP page title in the registry. Each window's
+ * extension instance binds its own ephemeral port and registers it under its
+ * own workspace name — this is what makes cursor_send/cursor_send_and_wait
+ * correct when more than one Cursor window is open at once (a fixed shared
+ * port cannot distinguish between windows).
+ */
+async function resolveExtensionPortForPage(pageId: string): Promise<number> {
+  const pages = await cdp.listPages(CURSOR_CDP_PORT);
+  const page = pages.find((p) => p.pageId === pageId);
+  const port = page ? registry.findExtensionPort(page.title) : undefined;
+  if (!port) {
+    throw new Error(
+      `Could not find a registered cursor-mcp-bridge extension port for page ${pageId}` +
+        (page ? ` (title: "${page.title}")` : "") +
+        `. Is the extension active in that window?`
+    );
+  }
+  return port;
+}
+
+async function getActiveComposerId(extensionPort: number): Promise<string | undefined> {
   const result = await bridgeCall(
     "POST",
     "/command",
@@ -675,7 +698,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "cursor_list_workspaces": {
         const pages = await cdp.listPages(CURSOR_CDP_PORT);
-        const results = pages.map((p) => ({ page_id: p.pageId, title: p.title }));
+        const results = pages.map((p) => ({
+          page_id: p.pageId,
+          title: p.title,
+          extension_port: registry.findExtensionPort(p.title) ?? null,
+          composers: composerStore.listComposersForWorkspace(p.title),
+        }));
         return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
       }
 
@@ -712,10 +740,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             sinceCount = before?.fullConversationHeadersOnly.length ?? 0;
             await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
           } else {
-            const beforeId = await getActiveComposerId();
+            const targetPort = await resolveExtensionPortForPage(pageId);
+            const beforeId = await getActiveComposerId(targetPort);
             const before = beforeId ? composerStore.readComposerData(beforeId) : null;
-            await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
-            composerId = (await getActiveComposerId()) ?? beforeId;
+            await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message, { extensionPort: targetPort });
+            composerId = (await getActiveComposerId(targetPort)) ?? beforeId;
             if (!composerId) throw new Error("Could not determine the active composer tab after sending.");
             sinceCount = composerId === beforeId ? (before?.fullConversationHeadersOnly.length ?? 0) : 0;
           }
@@ -742,8 +771,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (composerId) {
             await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
           } else {
-            await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message);
-            composerId = await getActiveComposerId();
+            const targetPort = await resolveExtensionPortForPage(pageId);
+            await cdp.sendMessage(CURSOR_CDP_PORT, pageId, message, { extensionPort: targetPort });
+            composerId = await getActiveComposerId(targetPort);
             if (!composerId) throw new Error("Could not determine the active composer tab after sending.");
           }
           return { content: [{ type: "text", text: JSON.stringify({ confirmed: true, composer_id: composerId, page_id: pageId }) }] };
