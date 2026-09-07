@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22.x, 24.x]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install and build (root client)
+        run: |
+          npm install
+          npm run build
+
+      - name: Test (root client)
+        run: node --test dist/*.test.js
+
+      - name: Install and build (extension)
+        working-directory: extension
+        run: |
+          npm install
+          npm run build
+
+      - name: Test (extension)
+        working-directory: extension
+        run: node --test dist/*.test.js

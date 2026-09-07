@@ -8,13 +8,23 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
+    "test": "node --test dist/*.test.js",
     "prepare": "npm run build"
   },
   "bin": {
     "cursor-bridge": "./dist/index.js"
   },
-  "keywords": ["mcp", "vscode", "cursor", "claude", "ide", "modelcontextprotocol"],
+  "keywords": ["mcp", "vscode", "cursor", "claude", "ide", "modelcontextprotocol", "cdp", "chrome-devtools-protocol"],
   "license": "MIT",
+  "author": "KloutDevs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KloutDevs/cursor-bridge.git"
+  },
+  "homepage": "https://github.com/KloutDevs/cursor-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/KloutDevs/cursor-bridge/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0"
   },

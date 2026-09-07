@@ -1,5 +1,8 @@
 # cursor-bridge
 
+[![CI](https://github.com/KloutDevs/cursor-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/KloutDevs/cursor-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 An MCP (Model Context Protocol) server that gives Claude IDE capabilities inside VS Code and Cursor. Claude can read, write, edit, search, and run commands in your workspace — directly from the chat.
 
 ## Tools
@@ -160,3 +163,17 @@ npm start      # run the built server
 - Pass `workspace_root` to any tool to anchor relative paths to a specific directory.
 - `run_command` accepts any shell command — use it for `git`, `npm`, linters, compilers, etc.
 - `search_files` skips `node_modules`, `dist`, and hidden folders automatically.
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, how to run tests, and PR guidelines. This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+
+Found a security issue? See [SECURITY.md](SECURITY.md) — please don't file it as a public issue.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+[MIT](LICENSE)

@@ -1,0 +1,54 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact tool calls / commands you ran, in order.
+      placeholder: |
+        1. cursor_list_workspaces
+        2. cursor_send_and_wait with page_id ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: cursor-version
+    attributes:
+      label: Cursor version
+      description: Output of `cursor --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS
+        - Windows
+        - Linux
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which tools were involved?
+      multiple: true
+      options:
+        - CDP-based (cursor_send, cursor_send_and_wait, cursor_read_chat, cursor_list_workspaces)
+        - Extension-backed (cursor_set_model, cursor_diagnostics, cursor_open_file, cursor_run_command, etc.)
+        - Filesystem tools (read_file, write_file, etc.)
+        - Not sure
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant error output or logs
+      render: shell
